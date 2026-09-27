@@ -1,0 +1,526 @@
+{
+  "format": "modelforge/graph",
+  "version": "0.1",
+  "model": {
+    "name": "MnistCnn",
+    "description": "经典卷积网络：两组 Conv2d+ReLU+MaxPool 后接全连接头。教学点：卷积的局部感受野与权重共享、池化降采样、形状公式 (H+2p−k)/s+1（28→28→14→14→7）。训练：数据集选 mnist，通常比 01 的 MLP 收敛更快、准确率更高。"
+  },
+  "inputs": [
+    {
+      "name": "x",
+      "dtype": "float32",
+      "shape": [
+        "batch",
+        1,
+        28,
+        28
+      ]
+    }
+  ],
+  "outputs": [
+    {
+      "name": "logits",
+      "dtype": "float32",
+      "shape": [
+        "batch",
+        10
+      ]
+    }
+  ],
+  "nodes": [
+    {
+      "id": "n1",
+      "name": "卷积 1→16 (3x3)",
+      "op": "Conv2d",
+      "group": "basic",
+      "attrs": {
+        "in_channels": 1,
+        "out_channels": 16,
+        "kernel_size": 3,
+        "stride": 1,
+        "padding": 1,
+        "dilation": 1,
+        "bias": true
+      },
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            1,
+            28,
+            28
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            16,
+            28,
+            28
+          ]
+        }
+      ],
+      "ui": {
+        "x": 100,
+        "y": 120
+      }
+    },
+    {
+      "id": "n2",
+      "name": "ReLU",
+      "op": "ReLU",
+      "group": "basic",
+      "attrs": {},
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            16,
+            28,
+            28
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            16,
+            28,
+            28
+          ]
+        }
+      ],
+      "ui": {
+        "x": 350,
+        "y": 120
+      }
+    },
+    {
+      "id": "n3",
+      "name": "最大池化 2x2",
+      "op": "MaxPool2d",
+      "group": "basic",
+      "attrs": {
+        "kernel_size": 2,
+        "stride": 2,
+        "padding": 0
+      },
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            16,
+            28,
+            28
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            16,
+            14,
+            14
+          ]
+        }
+      ],
+      "ui": {
+        "x": 600,
+        "y": 120
+      }
+    },
+    {
+      "id": "n4",
+      "name": "卷积 16→32 (3x3)",
+      "op": "Conv2d",
+      "group": "basic",
+      "attrs": {
+        "in_channels": 16,
+        "out_channels": 32,
+        "kernel_size": 3,
+        "stride": 1,
+        "padding": 1,
+        "dilation": 1,
+        "bias": true
+      },
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            16,
+            14,
+            14
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            32,
+            14,
+            14
+          ]
+        }
+      ],
+      "ui": {
+        "x": 850,
+        "y": 120
+      }
+    },
+    {
+      "id": "n5",
+      "name": "ReLU",
+      "op": "ReLU",
+      "group": "basic",
+      "attrs": {},
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            32,
+            14,
+            14
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            32,
+            14,
+            14
+          ]
+        }
+      ],
+      "ui": {
+        "x": 1100,
+        "y": 120
+      }
+    },
+    {
+      "id": "n6",
+      "name": "最大池化 2x2",
+      "op": "MaxPool2d",
+      "group": "basic",
+      "attrs": {
+        "kernel_size": 2,
+        "stride": 2,
+        "padding": 0
+      },
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            32,
+            14,
+            14
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            32,
+            7,
+            7
+          ]
+        }
+      ],
+      "ui": {
+        "x": 1350,
+        "y": 120
+      }
+    },
+    {
+      "id": "n7",
+      "name": "展平",
+      "op": "Flatten",
+      "group": "basic",
+      "attrs": {
+        "start_dim": 1,
+        "end_dim": -1
+      },
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            32,
+            7,
+            7
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            1568
+          ]
+        }
+      ],
+      "ui": {
+        "x": 1600,
+        "y": 120
+      }
+    },
+    {
+      "id": "n8",
+      "name": "全连接 1568→128",
+      "op": "Linear",
+      "group": "basic",
+      "attrs": {
+        "in_features": 1568,
+        "out_features": 128,
+        "bias": true
+      },
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            1568
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            128
+          ]
+        }
+      ],
+      "ui": {
+        "x": 1850,
+        "y": 120
+      }
+    },
+    {
+      "id": "n9",
+      "name": "ReLU",
+      "op": "ReLU",
+      "group": "basic",
+      "attrs": {},
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            128
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            128
+          ]
+        }
+      ],
+      "ui": {
+        "x": 2100,
+        "y": 120
+      }
+    },
+    {
+      "id": "n10",
+      "name": "全连接 128→10",
+      "op": "Linear",
+      "group": "basic",
+      "attrs": {
+        "in_features": 128,
+        "out_features": 10,
+        "bias": true
+      },
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            128
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            10
+          ]
+        }
+      ],
+      "ui": {
+        "x": 2350,
+        "y": 120
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "from": {
+        "node": "__graph_in__",
+        "port": "x"
+      },
+      "to": {
+        "node": "n1",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e2",
+      "from": {
+        "node": "n1",
+        "port": "y"
+      },
+      "to": {
+        "node": "n2",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e3",
+      "from": {
+        "node": "n2",
+        "port": "y"
+      },
+      "to": {
+        "node": "n3",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e4",
+      "from": {
+        "node": "n3",
+        "port": "y"
+      },
+      "to": {
+        "node": "n4",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e5",
+      "from": {
+        "node": "n4",
+        "port": "y"
+      },
+      "to": {
+        "node": "n5",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e6",
+      "from": {
+        "node": "n5",
+        "port": "y"
+      },
+      "to": {
+        "node": "n6",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e7",
+      "from": {
+        "node": "n6",
+        "port": "y"
+      },
+      "to": {
+        "node": "n7",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e8",
+      "from": {
+        "node": "n7",
+        "port": "y"
+      },
+      "to": {
+        "node": "n8",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e9",
+      "from": {
+        "node": "n8",
+        "port": "y"
+      },
+      "to": {
+        "node": "n9",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e10",
+      "from": {
+        "node": "n9",
+        "port": "y"
+      },
+      "to": {
+        "node": "n10",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e11",
+      "from": {
+        "node": "n10",
+        "port": "y"
+      },
+      "to": {
+        "node": "__graph_out__",
+        "port": "logits"
+      }
+    }
+  ]
+}

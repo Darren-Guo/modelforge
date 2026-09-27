@@ -1,0 +1,226 @@
+{
+  "format": "modelforge/graph",
+  "version": "0.1",
+  "model": {
+    "name": "MnistMlp",
+    "description": "最入门的全连接网络：Flatten→Linear→ReLU→Linear。教学点：Linear 的 y=xW+b、为什么层间必须夹激活函数、输出端不要接 Softmax（CrossEntropyLoss 自带 log_softmax）。训练：数据集选 mnist，epochs 5 即可到 90%+ 准确率。"
+  },
+  "inputs": [
+    {
+      "name": "x",
+      "dtype": "float32",
+      "shape": [
+        "batch",
+        1,
+        28,
+        28
+      ]
+    }
+  ],
+  "outputs": [
+    {
+      "name": "logits",
+      "dtype": "float32",
+      "shape": [
+        "batch",
+        10
+      ]
+    }
+  ],
+  "nodes": [
+    {
+      "id": "n1",
+      "name": "展平图像",
+      "op": "Flatten",
+      "group": "basic",
+      "attrs": {
+        "start_dim": 1,
+        "end_dim": -1
+      },
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            1,
+            28,
+            28
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            784
+          ]
+        }
+      ],
+      "ui": {
+        "x": 100,
+        "y": 120
+      }
+    },
+    {
+      "id": "n2",
+      "name": "全连接 784→128",
+      "op": "Linear",
+      "group": "basic",
+      "attrs": {
+        "in_features": 784,
+        "out_features": 128,
+        "bias": true
+      },
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            784
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            128
+          ]
+        }
+      ],
+      "ui": {
+        "x": 350,
+        "y": 120
+      }
+    },
+    {
+      "id": "n3",
+      "name": "ReLU",
+      "op": "ReLU",
+      "group": "basic",
+      "attrs": {},
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            128
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            128
+          ]
+        }
+      ],
+      "ui": {
+        "x": 600,
+        "y": 120
+      }
+    },
+    {
+      "id": "n4",
+      "name": "全连接 128→10",
+      "op": "Linear",
+      "group": "basic",
+      "attrs": {
+        "in_features": 128,
+        "out_features": 10,
+        "bias": true
+      },
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            128
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            10
+          ]
+        }
+      ],
+      "ui": {
+        "x": 850,
+        "y": 120
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "from": {
+        "node": "__graph_in__",
+        "port": "x"
+      },
+      "to": {
+        "node": "n1",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e2",
+      "from": {
+        "node": "n1",
+        "port": "y"
+      },
+      "to": {
+        "node": "n2",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e3",
+      "from": {
+        "node": "n2",
+        "port": "y"
+      },
+      "to": {
+        "node": "n3",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e4",
+      "from": {
+        "node": "n3",
+        "port": "y"
+      },
+      "to": {
+        "node": "n4",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e5",
+      "from": {
+        "node": "n4",
+        "port": "y"
+      },
+      "to": {
+        "node": "__graph_out__",
+        "port": "logits"
+      }
+    }
+  ]
+}

@@ -1,0 +1,416 @@
+{
+  "format": "modelforge/graph",
+  "version": "0.1",
+  "model": {
+    "name": "EncDecToy",
+    "description": "编码器-解码器（T5/翻译架构）：源序列走编码器，目标序列走解码层，解码层的 memory 端口吃编码器输出——这就是交叉注意力。教学点：encoder-only/decoder-only/enc-dec 三大家族的结构差异。训练：双输入模型，请选 random（num_samples≤128），或仅用于「生成代码」阅读交叉注意力。"
+  },
+  "inputs": [
+    {
+      "name": "src",
+      "dtype": "int64",
+      "shape": [
+        "batch",
+        16
+      ]
+    },
+    {
+      "name": "tgt",
+      "dtype": "int64",
+      "shape": [
+        "batch",
+        24
+      ]
+    }
+  ],
+  "outputs": [
+    {
+      "name": "logits",
+      "dtype": "float32",
+      "shape": [
+        "batch",
+        24,
+        10000
+      ]
+    }
+  ],
+  "nodes": [
+    {
+      "id": "n1",
+      "name": "源语言词嵌入",
+      "op": "Embedding",
+      "group": "basic",
+      "attrs": {
+        "num_embeddings": 10000,
+        "embedding_dim": 128
+      },
+      "inputs": [
+        {
+          "name": "ids",
+          "dtype": "int64",
+          "shape": [
+            "batch",
+            16
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            16,
+            128
+          ]
+        }
+      ],
+      "ui": {
+        "x": 100,
+        "y": 40
+      }
+    },
+    {
+      "id": "n2",
+      "name": "源序列位置编码",
+      "op": "PositionalEncoding",
+      "group": "llm",
+      "attrs": {
+        "d_model": 128,
+        "max_len": 64,
+        "kind": "sinusoidal",
+        "dropout": 0.0,
+        "batch_first": true
+      },
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            16,
+            128
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            16,
+            128
+          ]
+        }
+      ],
+      "ui": {
+        "x": 350,
+        "y": 40
+      }
+    },
+    {
+      "id": "n3",
+      "name": "编码器层",
+      "op": "TransformerEncoderLayer",
+      "group": "llm",
+      "attrs": {
+        "d_model": 128,
+        "nhead": 4,
+        "dim_feedforward": 512,
+        "dropout": 0.1,
+        "activation": "gelu",
+        "layer_norm_eps": 1e-05,
+        "batch_first": true
+      },
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            16,
+            128
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            16,
+            128
+          ]
+        }
+      ],
+      "ui": {
+        "x": 600,
+        "y": 40
+      }
+    },
+    {
+      "id": "n4",
+      "name": "目标语言词嵌入",
+      "op": "Embedding",
+      "group": "basic",
+      "attrs": {
+        "num_embeddings": 10000,
+        "embedding_dim": 128
+      },
+      "inputs": [
+        {
+          "name": "ids",
+          "dtype": "int64",
+          "shape": [
+            "batch",
+            24
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            24,
+            128
+          ]
+        }
+      ],
+      "ui": {
+        "x": 100,
+        "y": 260
+      }
+    },
+    {
+      "id": "n5",
+      "name": "目标序列位置编码",
+      "op": "PositionalEncoding",
+      "group": "llm",
+      "attrs": {
+        "d_model": 128,
+        "max_len": 64,
+        "kind": "sinusoidal",
+        "dropout": 0.0,
+        "batch_first": true
+      },
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            24,
+            128
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            24,
+            128
+          ]
+        }
+      ],
+      "ui": {
+        "x": 350,
+        "y": 260
+      }
+    },
+    {
+      "id": "n6",
+      "name": "解码器层（含交叉注意力）",
+      "op": "TransformerDecoderLayer",
+      "group": "llm",
+      "attrs": {
+        "d_model": 128,
+        "nhead": 4,
+        "dim_feedforward": 512,
+        "dropout": 0.1,
+        "activation": "gelu",
+        "layer_norm_eps": 1e-05,
+        "batch_first": true
+      },
+      "inputs": [
+        {
+          "name": "tgt",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            24,
+            128
+          ]
+        },
+        {
+          "name": "memory",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            16,
+            128
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            24,
+            128
+          ]
+        }
+      ],
+      "ui": {
+        "x": 850,
+        "y": 150
+      }
+    },
+    {
+      "id": "n7",
+      "name": "LM 头 128→10000",
+      "op": "LMHead",
+      "group": "llm",
+      "attrs": {
+        "d_model": 128,
+        "vocab_size": 10000,
+        "bias": false
+      },
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            24,
+            128
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "logits",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            24,
+            10000
+          ]
+        }
+      ],
+      "ui": {
+        "x": 1100,
+        "y": 150
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "from": {
+        "node": "__graph_in__",
+        "port": "src"
+      },
+      "to": {
+        "node": "n1",
+        "port": "ids"
+      }
+    },
+    {
+      "id": "e2",
+      "from": {
+        "node": "n1",
+        "port": "y"
+      },
+      "to": {
+        "node": "n2",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e3",
+      "from": {
+        "node": "n2",
+        "port": "y"
+      },
+      "to": {
+        "node": "n3",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e4",
+      "from": {
+        "node": "n3",
+        "port": "y"
+      },
+      "to": {
+        "node": "n6",
+        "port": "memory"
+      }
+    },
+    {
+      "id": "e5",
+      "from": {
+        "node": "__graph_in__",
+        "port": "tgt"
+      },
+      "to": {
+        "node": "n4",
+        "port": "ids"
+      }
+    },
+    {
+      "id": "e6",
+      "from": {
+        "node": "n4",
+        "port": "y"
+      },
+      "to": {
+        "node": "n5",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e7",
+      "from": {
+        "node": "n5",
+        "port": "y"
+      },
+      "to": {
+        "node": "n6",
+        "port": "tgt"
+      }
+    },
+    {
+      "id": "e8",
+      "from": {
+        "node": "n6",
+        "port": "y"
+      },
+      "to": {
+        "node": "n7",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e9",
+      "from": {
+        "node": "n7",
+        "port": "logits"
+      },
+      "to": {
+        "node": "__graph_out__",
+        "port": "logits"
+      }
+    }
+  ]
+}

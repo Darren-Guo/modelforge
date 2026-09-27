@@ -1,0 +1,284 @@
+{
+  "format": "modelforge/graph",
+  "version": "0.1",
+  "model": {
+    "name": "TextTransformer",
+    "description": "文本情感分类（Transformer 路线）：TokenEmbedding→正弦位置编码→编码层→展平→分类头。教学点：自注意力让每个 token 一步看到全序列（对照 04 的 LSTM）；为什么先加位置编码、Pre-LN/Post-LN（双击编码层看生成代码）。训练：数据集选 text_cls，seq 长度保持默认 32。"
+  },
+  "inputs": [
+    {
+      "name": "ids",
+      "dtype": "int64",
+      "shape": [
+        "batch",
+        32
+      ]
+    }
+  ],
+  "outputs": [
+    {
+      "name": "logits",
+      "dtype": "float32",
+      "shape": [
+        "batch",
+        2
+      ]
+    }
+  ],
+  "nodes": [
+    {
+      "id": "n1",
+      "name": "Token 嵌入 10000→128",
+      "op": "TokenEmbedding",
+      "group": "llm",
+      "attrs": {
+        "vocab_size": 10000,
+        "d_model": 128,
+        "scale": true
+      },
+      "inputs": [
+        {
+          "name": "ids",
+          "dtype": "int64",
+          "shape": [
+            "batch",
+            32
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            32,
+            128
+          ]
+        }
+      ],
+      "ui": {
+        "x": 100,
+        "y": 120
+      }
+    },
+    {
+      "id": "n2",
+      "name": "正弦位置编码",
+      "op": "PositionalEncoding",
+      "group": "llm",
+      "attrs": {
+        "d_model": 128,
+        "max_len": 64,
+        "kind": "sinusoidal",
+        "dropout": 0.0,
+        "batch_first": true
+      },
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            32,
+            128
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            32,
+            128
+          ]
+        }
+      ],
+      "ui": {
+        "x": 350,
+        "y": 120
+      }
+    },
+    {
+      "id": "n3",
+      "name": "Transformer 编码层",
+      "op": "TransformerEncoderLayer",
+      "group": "llm",
+      "attrs": {
+        "d_model": 128,
+        "nhead": 4,
+        "dim_feedforward": 256,
+        "dropout": 0.1,
+        "activation": "gelu",
+        "layer_norm_eps": 1e-05,
+        "batch_first": true
+      },
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            32,
+            128
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            32,
+            128
+          ]
+        }
+      ],
+      "ui": {
+        "x": 600,
+        "y": 120
+      }
+    },
+    {
+      "id": "n4",
+      "name": "展平整个序列",
+      "op": "Flatten",
+      "group": "basic",
+      "attrs": {
+        "start_dim": 1,
+        "end_dim": -1
+      },
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            32,
+            128
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            4096
+          ]
+        }
+      ],
+      "ui": {
+        "x": 850,
+        "y": 120
+      }
+    },
+    {
+      "id": "n5",
+      "name": "分类头 4096→2",
+      "op": "Linear",
+      "group": "basic",
+      "attrs": {
+        "in_features": 4096,
+        "out_features": 2,
+        "bias": true
+      },
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            4096
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            2
+          ]
+        }
+      ],
+      "ui": {
+        "x": 1100,
+        "y": 120
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "from": {
+        "node": "__graph_in__",
+        "port": "ids"
+      },
+      "to": {
+        "node": "n1",
+        "port": "ids"
+      }
+    },
+    {
+      "id": "e2",
+      "from": {
+        "node": "n1",
+        "port": "y"
+      },
+      "to": {
+        "node": "n2",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e3",
+      "from": {
+        "node": "n2",
+        "port": "y"
+      },
+      "to": {
+        "node": "n3",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e4",
+      "from": {
+        "node": "n3",
+        "port": "y"
+      },
+      "to": {
+        "node": "n4",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e5",
+      "from": {
+        "node": "n4",
+        "port": "y"
+      },
+      "to": {
+        "node": "n5",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e6",
+      "from": {
+        "node": "n5",
+        "port": "y"
+      },
+      "to": {
+        "node": "__graph_out__",
+        "port": "logits"
+      }
+    }
+  ]
+}

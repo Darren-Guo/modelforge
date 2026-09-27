@@ -301,6 +301,20 @@ export default function PropPanel() {
           ))}
           <div className="mf-props-hint">输出端口 shape 可手动修改（冲突时校验会报错）；输入端口 shape 由上游连线推导自动回填。</div>
         </div>
+
+        <Divider plain>操作</Divider>
+        <div className="mf-props-section">
+          <Popconfirm
+            title={`删除节点「${d.name}」？`}
+            description="与它相连的边会一并删除"
+            okText="删除"
+            cancelText="取消"
+            onConfirm={() => store.deleteElements([selectedNode.id], [])}
+          >
+            <Button block danger icon={<DeleteOutlined />}>删除节点</Button>
+          </Popconfirm>
+          <div className="mf-props-hint">也可以选中后按 Delete / Backspace。</div>
+        </div>
       </div>
     );
   }
@@ -329,6 +343,7 @@ export default function PropPanel() {
             添加端口
           </Button>
           <div className="mf-props-hint">端口的名称、dtype、shape 都可修改，保存为自定义模块时沿用。</div>
+          <div className="mf-props-hint">「模型输入 / 模型输出」是图的固定端点，不可删除。</div>
         </div>
       </div>
     );
@@ -385,6 +400,15 @@ export default function PropPanel() {
           <Divider plain>多选</Divider>
           <div className="mf-props-section">
             <div className="mf-props-hint">已选中 {selectedNodeIds.length} 个节点，可在工具栏「保存为模块」。</div>
+            <Popconfirm
+              title={`删除选中的 ${selectedNodeIds.length} 个节点？`}
+              description="与它们相连的边会一并删除"
+              okText="删除"
+              cancelText="取消"
+              onConfirm={() => store.deleteElements(selectedNodeIds, [])}
+            >
+              <Button block danger icon={<DeleteOutlined />}>删除选中节点</Button>
+            </Popconfirm>
           </div>
         </>
       )}

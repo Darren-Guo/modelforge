@@ -1,0 +1,243 @@
+{
+  "format": "modelforge/graph",
+  "version": "0.1",
+  "model": {
+    "name": "LoraParallel",
+    "description": "LoRA 并联电路：主干 Linear 与 LoRAAdapter 并联，Add 合流。教学点：y = x + (α/r)·up(down(x)) 的低秩偏移、up 零初始化 → 初始等价恒等（训练开始不破坏原模型）；双输入的 Add 就是这样搭残差/旁路的。训练：数据集选 random。把 LoRA 的 rank 从 8 改成 64，感受可训练参数量的变化。"
+  },
+  "inputs": [
+    {
+      "name": "x",
+      "dtype": "float32",
+      "shape": [
+        "batch",
+        128
+      ]
+    }
+  ],
+  "outputs": [
+    {
+      "name": "y",
+      "dtype": "float32",
+      "shape": [
+        "batch",
+        4
+      ]
+    }
+  ],
+  "nodes": [
+    {
+      "id": "n1",
+      "name": "主干 Linear 128→128",
+      "op": "Linear",
+      "group": "basic",
+      "attrs": {
+        "in_features": 128,
+        "out_features": 128,
+        "bias": true
+      },
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            128
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            128
+          ]
+        }
+      ],
+      "ui": {
+        "x": 100,
+        "y": 40
+      }
+    },
+    {
+      "id": "n2",
+      "name": "LoRA 旁路 rank=8",
+      "op": "LoRAAdapter",
+      "group": "llm",
+      "attrs": {
+        "dim": 128,
+        "rank": 8,
+        "alpha": 16.0,
+        "dropout": 0.0
+      },
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            128
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            128
+          ]
+        }
+      ],
+      "ui": {
+        "x": 100,
+        "y": 220
+      }
+    },
+    {
+      "id": "n3",
+      "name": "残差合流 Add",
+      "op": "Add",
+      "group": "basic",
+      "attrs": {},
+      "inputs": [
+        {
+          "name": "x1",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            128
+          ]
+        },
+        {
+          "name": "x2",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            128
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            128
+          ]
+        }
+      ],
+      "ui": {
+        "x": 350,
+        "y": 130
+      }
+    },
+    {
+      "id": "n4",
+      "name": "分类头 128→4",
+      "op": "Linear",
+      "group": "basic",
+      "attrs": {
+        "in_features": 128,
+        "out_features": 4,
+        "bias": true
+      },
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            128
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            4
+          ]
+        }
+      ],
+      "ui": {
+        "x": 600,
+        "y": 130
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "from": {
+        "node": "__graph_in__",
+        "port": "x"
+      },
+      "to": {
+        "node": "n1",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e2",
+      "from": {
+        "node": "n1",
+        "port": "y"
+      },
+      "to": {
+        "node": "n3",
+        "port": "x1"
+      }
+    },
+    {
+      "id": "e3",
+      "from": {
+        "node": "__graph_in__",
+        "port": "x"
+      },
+      "to": {
+        "node": "n2",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e4",
+      "from": {
+        "node": "n2",
+        "port": "y"
+      },
+      "to": {
+        "node": "n3",
+        "port": "x2"
+      }
+    },
+    {
+      "id": "e5",
+      "from": {
+        "node": "n3",
+        "port": "y"
+      },
+      "to": {
+        "node": "n4",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e6",
+      "from": {
+        "node": "n4",
+        "port": "y"
+      },
+      "to": {
+        "node": "__graph_out__",
+        "port": "y"
+      }
+    }
+  ]
+}

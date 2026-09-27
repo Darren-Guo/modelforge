@@ -1,0 +1,290 @@
+{
+  "format": "modelforge/graph",
+  "version": "0.1",
+  "model": {
+    "name": "MiniGptStack",
+    "description": "decoder-only 风格栈：TokenEmbedding→RoPE→2×编码层→LMHead 输出全序列 logits。教学点：现代 LLM 的零件组合（RoPE 旋转位置编码 + FFN 4×）、参数量大头在词表；诚实提示：本项目注意力无因果掩码，这是双向注意力版「GPT 形状」，不是因果语言模型。训练：输出是全序列 logits，不满足分类数据集契约，请选 random（num_samples≤256, epochs≤2），主要用于「生成代码」阅读结构。"
+  },
+  "inputs": [
+    {
+      "name": "ids",
+      "dtype": "int64",
+      "shape": [
+        "batch",
+        16
+      ]
+    }
+  ],
+  "outputs": [
+    {
+      "name": "logits",
+      "dtype": "float32",
+      "shape": [
+        "batch",
+        16,
+        2048
+      ]
+    }
+  ],
+  "nodes": [
+    {
+      "id": "n1",
+      "name": "Token 嵌入 2048→128",
+      "op": "TokenEmbedding",
+      "group": "llm",
+      "attrs": {
+        "vocab_size": 2048,
+        "d_model": 128,
+        "scale": true
+      },
+      "inputs": [
+        {
+          "name": "ids",
+          "dtype": "int64",
+          "shape": [
+            "batch",
+            16
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            16,
+            128
+          ]
+        }
+      ],
+      "ui": {
+        "x": 100,
+        "y": 120
+      }
+    },
+    {
+      "id": "n2",
+      "name": "RoPE 旋转位置编码",
+      "op": "RoPE",
+      "group": "basic",
+      "attrs": {
+        "dim": 128,
+        "base": 10000.0
+      },
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            16,
+            128
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            16,
+            128
+          ]
+        }
+      ],
+      "ui": {
+        "x": 350,
+        "y": 120
+      }
+    },
+    {
+      "id": "n3",
+      "name": "Transformer 块 ×1",
+      "op": "TransformerEncoderLayer",
+      "group": "llm",
+      "attrs": {
+        "d_model": 128,
+        "nhead": 4,
+        "dim_feedforward": 512,
+        "dropout": 0.1,
+        "activation": "gelu",
+        "layer_norm_eps": 1e-05,
+        "batch_first": true
+      },
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            16,
+            128
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            16,
+            128
+          ]
+        }
+      ],
+      "ui": {
+        "x": 600,
+        "y": 120
+      }
+    },
+    {
+      "id": "n4",
+      "name": "Transformer 块 ×2",
+      "op": "TransformerEncoderLayer",
+      "group": "llm",
+      "attrs": {
+        "d_model": 128,
+        "nhead": 4,
+        "dim_feedforward": 512,
+        "dropout": 0.1,
+        "activation": "gelu",
+        "layer_norm_eps": 1e-05,
+        "batch_first": true
+      },
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            16,
+            128
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            16,
+            128
+          ]
+        }
+      ],
+      "ui": {
+        "x": 850,
+        "y": 120
+      }
+    },
+    {
+      "id": "n5",
+      "name": "LM 头 128→2048",
+      "op": "LMHead",
+      "group": "llm",
+      "attrs": {
+        "d_model": 128,
+        "vocab_size": 2048,
+        "bias": false
+      },
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            16,
+            128
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "logits",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            16,
+            2048
+          ]
+        }
+      ],
+      "ui": {
+        "x": 1100,
+        "y": 120
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "from": {
+        "node": "__graph_in__",
+        "port": "ids"
+      },
+      "to": {
+        "node": "n1",
+        "port": "ids"
+      }
+    },
+    {
+      "id": "e2",
+      "from": {
+        "node": "n1",
+        "port": "y"
+      },
+      "to": {
+        "node": "n2",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e3",
+      "from": {
+        "node": "n2",
+        "port": "y"
+      },
+      "to": {
+        "node": "n3",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e4",
+      "from": {
+        "node": "n3",
+        "port": "y"
+      },
+      "to": {
+        "node": "n4",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e5",
+      "from": {
+        "node": "n4",
+        "port": "y"
+      },
+      "to": {
+        "node": "n5",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e6",
+      "from": {
+        "node": "n5",
+        "port": "logits"
+      },
+      "to": {
+        "node": "__graph_out__",
+        "port": "logits"
+      }
+    }
+  ]
+}

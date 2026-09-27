@@ -1,0 +1,338 @@
+{
+  "format": "modelforge/graph",
+  "version": "0.1",
+  "model": {
+    "name": "MnistResnet",
+    "description": "视觉残差：Conv→ReLU→ResNetBlock→MaxPool→全连接头。教学点：残差连接 y=x+F(x) 让梯度走恒等高速公路（双击 ResNetBlock 看它的 skip 分支：stride≠1 或通道数变化时用 1×1 卷积做形状适配）。训练：数据集选 mnist。"
+  },
+  "inputs": [
+    {
+      "name": "x",
+      "dtype": "float32",
+      "shape": [
+        "batch",
+        1,
+        28,
+        28
+      ]
+    }
+  ],
+  "outputs": [
+    {
+      "name": "logits",
+      "dtype": "float32",
+      "shape": [
+        "batch",
+        10
+      ]
+    }
+  ],
+  "nodes": [
+    {
+      "id": "n1",
+      "name": "卷积 1→32 (3x3)",
+      "op": "Conv2d",
+      "group": "basic",
+      "attrs": {
+        "in_channels": 1,
+        "out_channels": 32,
+        "kernel_size": 3,
+        "stride": 1,
+        "padding": 1,
+        "dilation": 1,
+        "bias": true
+      },
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            1,
+            28,
+            28
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            32,
+            28,
+            28
+          ]
+        }
+      ],
+      "ui": {
+        "x": 100,
+        "y": 120
+      }
+    },
+    {
+      "id": "n2",
+      "name": "ReLU",
+      "op": "ReLU",
+      "group": "basic",
+      "attrs": {},
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            32,
+            28,
+            28
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            32,
+            28,
+            28
+          ]
+        }
+      ],
+      "ui": {
+        "x": 350,
+        "y": 120
+      }
+    },
+    {
+      "id": "n3",
+      "name": "ResNet 残差块 32→32",
+      "op": "ResNetBlock",
+      "group": "llm",
+      "attrs": {
+        "in_channels": 32,
+        "out_channels": 32,
+        "stride": 1
+      },
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            32,
+            28,
+            28
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            32,
+            28,
+            28
+          ]
+        }
+      ],
+      "ui": {
+        "x": 600,
+        "y": 120
+      }
+    },
+    {
+      "id": "n4",
+      "name": "最大池化 2x2",
+      "op": "MaxPool2d",
+      "group": "basic",
+      "attrs": {
+        "kernel_size": 2,
+        "stride": 2,
+        "padding": 0
+      },
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            32,
+            28,
+            28
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            32,
+            14,
+            14
+          ]
+        }
+      ],
+      "ui": {
+        "x": 850,
+        "y": 120
+      }
+    },
+    {
+      "id": "n5",
+      "name": "展平",
+      "op": "Flatten",
+      "group": "basic",
+      "attrs": {
+        "start_dim": 1,
+        "end_dim": -1
+      },
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            32,
+            14,
+            14
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            6272
+          ]
+        }
+      ],
+      "ui": {
+        "x": 1100,
+        "y": 120
+      }
+    },
+    {
+      "id": "n6",
+      "name": "全连接 6272→10",
+      "op": "Linear",
+      "group": "basic",
+      "attrs": {
+        "in_features": 6272,
+        "out_features": 10,
+        "bias": true
+      },
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            6272
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            10
+          ]
+        }
+      ],
+      "ui": {
+        "x": 1350,
+        "y": 120
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "from": {
+        "node": "__graph_in__",
+        "port": "x"
+      },
+      "to": {
+        "node": "n1",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e2",
+      "from": {
+        "node": "n1",
+        "port": "y"
+      },
+      "to": {
+        "node": "n2",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e3",
+      "from": {
+        "node": "n2",
+        "port": "y"
+      },
+      "to": {
+        "node": "n3",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e4",
+      "from": {
+        "node": "n3",
+        "port": "y"
+      },
+      "to": {
+        "node": "n4",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e5",
+      "from": {
+        "node": "n4",
+        "port": "y"
+      },
+      "to": {
+        "node": "n5",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e6",
+      "from": {
+        "node": "n5",
+        "port": "y"
+      },
+      "to": {
+        "node": "n6",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e7",
+      "from": {
+        "node": "n6",
+        "port": "y"
+      },
+      "to": {
+        "node": "__graph_out__",
+        "port": "logits"
+      }
+    }
+  ]
+}

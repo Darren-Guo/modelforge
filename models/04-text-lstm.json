@@ -1,0 +1,232 @@
+{
+  "format": "modelforge/graph",
+  "version": "0.1",
+  "model": {
+    "name": "TextLstm",
+    "description": "文本情感分类（RNN 路线）：词嵌入→LSTM→展平→分类头。教学点：Embedding 是查表（one-hot×W 的快速特例）、LSTM 沿序列逐格递推（对照 05 的 Transformer 看并行性差异）。训练：数据集选 text_cls，seq 长度保持默认 32。"
+  },
+  "inputs": [
+    {
+      "name": "ids",
+      "dtype": "int64",
+      "shape": [
+        "batch",
+        32
+      ]
+    }
+  ],
+  "outputs": [
+    {
+      "name": "logits",
+      "dtype": "float32",
+      "shape": [
+        "batch",
+        2
+      ]
+    }
+  ],
+  "nodes": [
+    {
+      "id": "n1",
+      "name": "词嵌入 10000→64",
+      "op": "Embedding",
+      "group": "basic",
+      "attrs": {
+        "num_embeddings": 10000,
+        "embedding_dim": 64
+      },
+      "inputs": [
+        {
+          "name": "ids",
+          "dtype": "int64",
+          "shape": [
+            "batch",
+            32
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            32,
+            64
+          ]
+        }
+      ],
+      "ui": {
+        "x": 100,
+        "y": 120
+      }
+    },
+    {
+      "id": "n2",
+      "name": "LSTM 64→128",
+      "op": "LSTM",
+      "group": "basic",
+      "attrs": {
+        "input_size": 64,
+        "hidden_size": 128,
+        "num_layers": 1,
+        "bidirectional": false,
+        "batch_first": true,
+        "dropout": 0.0
+      },
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            32,
+            64
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            32,
+            128
+          ]
+        }
+      ],
+      "ui": {
+        "x": 350,
+        "y": 120
+      }
+    },
+    {
+      "id": "n3",
+      "name": "展平整个序列",
+      "op": "Flatten",
+      "group": "basic",
+      "attrs": {
+        "start_dim": 1,
+        "end_dim": -1
+      },
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            32,
+            128
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            4096
+          ]
+        }
+      ],
+      "ui": {
+        "x": 600,
+        "y": 120
+      }
+    },
+    {
+      "id": "n4",
+      "name": "分类头 4096→2",
+      "op": "Linear",
+      "group": "basic",
+      "attrs": {
+        "in_features": 4096,
+        "out_features": 2,
+        "bias": true
+      },
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            4096
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            2
+          ]
+        }
+      ],
+      "ui": {
+        "x": 850,
+        "y": 120
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "from": {
+        "node": "__graph_in__",
+        "port": "ids"
+      },
+      "to": {
+        "node": "n1",
+        "port": "ids"
+      }
+    },
+    {
+      "id": "e2",
+      "from": {
+        "node": "n1",
+        "port": "y"
+      },
+      "to": {
+        "node": "n2",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e3",
+      "from": {
+        "node": "n2",
+        "port": "y"
+      },
+      "to": {
+        "node": "n3",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e4",
+      "from": {
+        "node": "n3",
+        "port": "y"
+      },
+      "to": {
+        "node": "n4",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e5",
+      "from": {
+        "node": "n4",
+        "port": "y"
+      },
+      "to": {
+        "node": "__graph_out__",
+        "port": "logits"
+      }
+    }
+  ]
+}
