@@ -1,0 +1,922 @@
+{
+  "format": "modelforge/graph",
+  "version": "0.1",
+  "model": {
+    "name": "Qwen25_05B",
+    "description": "Qwen2.5-0.5B 结构复刻（教学版，画 2/24 层）：pre-LN RMSNorm + RoPE(θ=1e6) + 自注意力（896 维/14 头，head_dim=64）+ silu MLP（4864 中间维）+ 末层 RMSNorm + LMHead。与真实 Qwen 的差异（注册表达不到，读代码时对照）：① 无因果掩码，是双向注意力；② MHA 无 GQA（真实 KV 头=2）；③ SwiGLU 门控需逐元素乘，用 silu MLP 近似；④ 真实仅 QKV 有 bias、输出投影无 bias，这里统一有；⑤ 词嵌入与 LMHead 权重绑定（0.5B 版 tied）无法表达；⑥ 真实 Qwen 在注意力内部旋转 Q/K，这里把 RoPE 挂在注意力前的数据流上（近似）；⑦ 现代实现不乘 √d，TokenEmbedding 的 scale 已关。注意：词表 151936 = 1.36 亿参数，请勿用 random 数据集训练（targets 会占数十 GB），仅供「生成代码」阅读结构。"
+  },
+  "inputs": [
+    {
+      "name": "ids",
+      "dtype": "int64",
+      "shape": [
+        "batch",
+        64
+      ]
+    }
+  ],
+  "outputs": [
+    {
+      "name": "logits",
+      "dtype": "float32",
+      "shape": [
+        "batch",
+        64,
+        151936
+      ]
+    }
+  ],
+  "nodes": [
+    {
+      "id": "n_emb",
+      "name": "Token 嵌入 151936→896",
+      "op": "TokenEmbedding",
+      "group": "llm",
+      "attrs": {
+        "vocab_size": 151936,
+        "d_model": 896,
+        "scale": false
+      },
+      "inputs": [
+        {
+          "name": "ids",
+          "dtype": "int64",
+          "shape": [
+            "batch",
+            64
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            64,
+            896
+          ]
+        }
+      ],
+      "ui": {
+        "x": 80,
+        "y": 320
+      }
+    },
+    {
+      "id": "b1_norm1",
+      "name": "块1·RMSNorm(pre-LN)",
+      "op": "RMSNorm",
+      "group": "basic",
+      "attrs": {
+        "normalized_shape": 896,
+        "eps": 1e-06
+      },
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            64,
+            896
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            64,
+            896
+          ]
+        }
+      ],
+      "ui": {
+        "x": 330,
+        "y": 320
+      }
+    },
+    {
+      "id": "b1_rope",
+      "name": "块1·RoPE θ=1e6",
+      "op": "RoPE",
+      "group": "basic",
+      "attrs": {
+        "dim": 896,
+        "base": 1000000.0
+      },
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            64,
+            896
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            64,
+            896
+          ]
+        }
+      ],
+      "ui": {
+        "x": 580,
+        "y": 320
+      }
+    },
+    {
+      "id": "b1_attn",
+      "name": "块1·自注意力 14 头",
+      "op": "MultiHeadAttention",
+      "group": "basic",
+      "attrs": {
+        "embed_dim": 896,
+        "num_heads": 14,
+        "dropout": 0.0,
+        "bias": true,
+        "batch_first": true
+      },
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            64,
+            896
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            64,
+            896
+          ]
+        }
+      ],
+      "ui": {
+        "x": 830,
+        "y": 320
+      }
+    },
+    {
+      "id": "b1_add1",
+      "name": "块1·残差合流①",
+      "op": "Add",
+      "group": "basic",
+      "attrs": {},
+      "inputs": [
+        {
+          "name": "x1",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            64,
+            896
+          ]
+        },
+        {
+          "name": "x2",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            64,
+            896
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            64,
+            896
+          ]
+        }
+      ],
+      "ui": {
+        "x": 1080,
+        "y": 320
+      }
+    },
+    {
+      "id": "b1_norm2",
+      "name": "块1·RMSNorm(pre-FFN)",
+      "op": "RMSNorm",
+      "group": "basic",
+      "attrs": {
+        "normalized_shape": 896,
+        "eps": 1e-06
+      },
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            64,
+            896
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            64,
+            896
+          ]
+        }
+      ],
+      "ui": {
+        "x": 1330,
+        "y": 500
+      }
+    },
+    {
+      "id": "b1_mlp",
+      "name": "块1·MLP(silu) 896→4864→896",
+      "op": "MLP",
+      "group": "llm",
+      "attrs": {
+        "dim": 896,
+        "hidden_dim": 4864,
+        "activation": "silu",
+        "dropout": 0.0
+      },
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            64,
+            896
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            64,
+            896
+          ]
+        }
+      ],
+      "ui": {
+        "x": 1580,
+        "y": 500
+      }
+    },
+    {
+      "id": "b1_add2",
+      "name": "块1·残差合流②",
+      "op": "Add",
+      "group": "basic",
+      "attrs": {},
+      "inputs": [
+        {
+          "name": "x1",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            64,
+            896
+          ]
+        },
+        {
+          "name": "x2",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            64,
+            896
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            64,
+            896
+          ]
+        }
+      ],
+      "ui": {
+        "x": 1830,
+        "y": 320
+      }
+    },
+    {
+      "id": "b2_norm1",
+      "name": "块2·RMSNorm(pre-LN)",
+      "op": "RMSNorm",
+      "group": "basic",
+      "attrs": {
+        "normalized_shape": 896,
+        "eps": 1e-06
+      },
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            64,
+            896
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            64,
+            896
+          ]
+        }
+      ],
+      "ui": {
+        "x": 2080,
+        "y": 320
+      }
+    },
+    {
+      "id": "b2_rope",
+      "name": "块2·RoPE θ=1e6",
+      "op": "RoPE",
+      "group": "basic",
+      "attrs": {
+        "dim": 896,
+        "base": 1000000.0
+      },
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            64,
+            896
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            64,
+            896
+          ]
+        }
+      ],
+      "ui": {
+        "x": 2330,
+        "y": 320
+      }
+    },
+    {
+      "id": "b2_attn",
+      "name": "块2·自注意力 14 头",
+      "op": "MultiHeadAttention",
+      "group": "basic",
+      "attrs": {
+        "embed_dim": 896,
+        "num_heads": 14,
+        "dropout": 0.0,
+        "bias": true,
+        "batch_first": true
+      },
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            64,
+            896
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            64,
+            896
+          ]
+        }
+      ],
+      "ui": {
+        "x": 2580,
+        "y": 320
+      }
+    },
+    {
+      "id": "b2_add1",
+      "name": "块2·残差合流①",
+      "op": "Add",
+      "group": "basic",
+      "attrs": {},
+      "inputs": [
+        {
+          "name": "x1",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            64,
+            896
+          ]
+        },
+        {
+          "name": "x2",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            64,
+            896
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            64,
+            896
+          ]
+        }
+      ],
+      "ui": {
+        "x": 2830,
+        "y": 320
+      }
+    },
+    {
+      "id": "b2_norm2",
+      "name": "块2·RMSNorm(pre-FFN)",
+      "op": "RMSNorm",
+      "group": "basic",
+      "attrs": {
+        "normalized_shape": 896,
+        "eps": 1e-06
+      },
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            64,
+            896
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            64,
+            896
+          ]
+        }
+      ],
+      "ui": {
+        "x": 3080,
+        "y": 500
+      }
+    },
+    {
+      "id": "b2_mlp",
+      "name": "块2·MLP(silu) 896→4864→896",
+      "op": "MLP",
+      "group": "llm",
+      "attrs": {
+        "dim": 896,
+        "hidden_dim": 4864,
+        "activation": "silu",
+        "dropout": 0.0
+      },
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            64,
+            896
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            64,
+            896
+          ]
+        }
+      ],
+      "ui": {
+        "x": 3330,
+        "y": 500
+      }
+    },
+    {
+      "id": "b2_add2",
+      "name": "块2·残差合流②",
+      "op": "Add",
+      "group": "basic",
+      "attrs": {},
+      "inputs": [
+        {
+          "name": "x1",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            64,
+            896
+          ]
+        },
+        {
+          "name": "x2",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            64,
+            896
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            64,
+            896
+          ]
+        }
+      ],
+      "ui": {
+        "x": 3580,
+        "y": 320
+      }
+    },
+    {
+      "id": "n_normf",
+      "name": "末层 RMSNorm",
+      "op": "RMSNorm",
+      "group": "basic",
+      "attrs": {
+        "normalized_shape": 896,
+        "eps": 1e-06
+      },
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            64,
+            896
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            64,
+            896
+          ]
+        }
+      ],
+      "ui": {
+        "x": 3830,
+        "y": 320
+      }
+    },
+    {
+      "id": "n_head",
+      "name": "LM 头 896→151936",
+      "op": "LMHead",
+      "group": "llm",
+      "attrs": {
+        "d_model": 896,
+        "vocab_size": 151936,
+        "bias": false
+      },
+      "inputs": [
+        {
+          "name": "x",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            64,
+            896
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "logits",
+          "dtype": "float32",
+          "shape": [
+            "batch",
+            64,
+            151936
+          ]
+        }
+      ],
+      "ui": {
+        "x": 4080,
+        "y": 320
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e_in",
+      "from": {
+        "node": "__graph_in__",
+        "port": "ids"
+      },
+      "to": {
+        "node": "n_emb",
+        "port": "ids"
+      }
+    },
+    {
+      "id": "e_b1_1",
+      "from": {
+        "node": "n_emb",
+        "port": "y"
+      },
+      "to": {
+        "node": "b1_norm1",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e_b1_2",
+      "from": {
+        "node": "b1_norm1",
+        "port": "y"
+      },
+      "to": {
+        "node": "b1_rope",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e_b1_3",
+      "from": {
+        "node": "b1_rope",
+        "port": "y"
+      },
+      "to": {
+        "node": "b1_attn",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e_b1_4",
+      "from": {
+        "node": "n_emb",
+        "port": "y"
+      },
+      "to": {
+        "node": "b1_add1",
+        "port": "x1"
+      }
+    },
+    {
+      "id": "e_b1_5",
+      "from": {
+        "node": "b1_attn",
+        "port": "y"
+      },
+      "to": {
+        "node": "b1_add1",
+        "port": "x2"
+      }
+    },
+    {
+      "id": "e_b1_6",
+      "from": {
+        "node": "b1_add1",
+        "port": "y"
+      },
+      "to": {
+        "node": "b1_norm2",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e_b1_7",
+      "from": {
+        "node": "b1_norm2",
+        "port": "y"
+      },
+      "to": {
+        "node": "b1_mlp",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e_b1_8",
+      "from": {
+        "node": "b1_add1",
+        "port": "y"
+      },
+      "to": {
+        "node": "b1_add2",
+        "port": "x1"
+      }
+    },
+    {
+      "id": "e_b1_9",
+      "from": {
+        "node": "b1_mlp",
+        "port": "y"
+      },
+      "to": {
+        "node": "b1_add2",
+        "port": "x2"
+      }
+    },
+    {
+      "id": "e_b2_1",
+      "from": {
+        "node": "b1_add2",
+        "port": "y"
+      },
+      "to": {
+        "node": "b2_norm1",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e_b2_2",
+      "from": {
+        "node": "b2_norm1",
+        "port": "y"
+      },
+      "to": {
+        "node": "b2_rope",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e_b2_3",
+      "from": {
+        "node": "b2_rope",
+        "port": "y"
+      },
+      "to": {
+        "node": "b2_attn",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e_b2_4",
+      "from": {
+        "node": "b1_add2",
+        "port": "y"
+      },
+      "to": {
+        "node": "b2_add1",
+        "port": "x1"
+      }
+    },
+    {
+      "id": "e_b2_5",
+      "from": {
+        "node": "b2_attn",
+        "port": "y"
+      },
+      "to": {
+        "node": "b2_add1",
+        "port": "x2"
+      }
+    },
+    {
+      "id": "e_b2_6",
+      "from": {
+        "node": "b2_add1",
+        "port": "y"
+      },
+      "to": {
+        "node": "b2_norm2",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e_b2_7",
+      "from": {
+        "node": "b2_norm2",
+        "port": "y"
+      },
+      "to": {
+        "node": "b2_mlp",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e_b2_8",
+      "from": {
+        "node": "b2_add1",
+        "port": "y"
+      },
+      "to": {
+        "node": "b2_add2",
+        "port": "x1"
+      }
+    },
+    {
+      "id": "e_b2_9",
+      "from": {
+        "node": "b2_mlp",
+        "port": "y"
+      },
+      "to": {
+        "node": "b2_add2",
+        "port": "x2"
+      }
+    },
+    {
+      "id": "e_f1",
+      "from": {
+        "node": "b2_add2",
+        "port": "y"
+      },
+      "to": {
+        "node": "n_normf",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e_f2",
+      "from": {
+        "node": "n_normf",
+        "port": "y"
+      },
+      "to": {
+        "node": "n_head",
+        "port": "x"
+      }
+    },
+    {
+      "id": "e_f3",
+      "from": {
+        "node": "n_head",
+        "port": "logits"
+      },
+      "to": {
+        "node": "__graph_out__",
+        "port": "logits"
+      }
+    }
+  ]
+}
