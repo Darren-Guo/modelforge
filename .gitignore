@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Node
+node_modules/
+dist/
+
+# 运行时数据：数据集、生成的代码包、训练 runs、SQLite
+backend/data/
+
+# 日志
+*.log
+
+# 环境与本地工具
+.env
+.zcode/
+
+# 系统
+Thumbs.db
+.DS_Store

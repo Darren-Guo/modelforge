@@ -1,0 +1,152 @@
+/** 场景3：训练面板（选数据集/超参 → 启动训练 → SSE 实时日志）。 */
+import { useEffect, useRef, useState } from 'react';
+import { Alert, Button, Form, Input, InputNumber, Modal, Select, Space, Spin, Tag, message } from 'antd';
+import { PauseCircleOutlined, PlayCircleOutlined } from '@ant-design/icons';
+import { useGraphStore } from '../stores/graphStore';
+import { useUIStore } from '../stores/uiStore';
+import type { DatasetInfo, TrainingJob } from '../schema/graph';
+import * as api from '../api/client';
+
+export default function TrainModal() {
+  const store = useGraphStore();
+  const { trainOpen, setTrainOpen, setModelsOpen } = useUIStore();
+  const [datasets, setDatasets] = useState<DatasetInfo[]>([]);
+  const [dataset, setDataset] = useState('random');
+  const [modelId, setModelId] = useState('');
+  const [epochs, setEpochs] = useState(3);
+  const [batchSize, setBatchSize] = useState(32);
+  const [lr, setLr] = useState(0.001);
+  const [numSamples, setNumSamples] = useState(512);
+  const [job, setJob] = useState<TrainingJob | null>(null);
+  const [starting, setStarting] = useState(false);
+  const [logs, setLogs] = useState<string[]>([]);
+  const esRef = useRef<EventSource | null>(null);
+  const logEnd = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (trainOpen) {
+      void api.fetchDatasets().then(setDatasets).catch(() => setDatasets([]));
+      setModelId(`${store.modelMeta.name || 'model'}-${new Date().toISOString().slice(5, 16).replace(/[-T:]/g, '')}`);
+    } else {
+      esRef.current?.close();
+      esRef.current = null;
+      setJob(null);
+      setLogs([]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [trainOpen]);
+
+  useEffect(() => {
+    logEnd.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [logs]);
+
+  const start = async () => {
+    setStarting(true);
+    setLogs([]);
+    try {
+      const res = await api.startTraining({
+        graph: store.exportGraph(),
+        model_id: modelId.trim() || null,
+        dataset, epochs, batch_size: batchSize, lr, num_samples: numSamples,
+      });
+      setJob(res.job);
+      const es = new EventSource(`/api/trainings/${res.job.job_id}/logs`);
+      esRef.current = es;
+      es.onmessage = (ev) => {
+        try {
+          const evt = JSON.parse(ev.data);
+          if (evt.type === 'metric') {
+            const acc = evt.val_acc !== undefined ? ` acc=${evt.val_acc}` : '';
+            setLogs((l) => [...l, `epoch ${evt.epoch}  train_loss=${evt.train_loss}  val_loss=${evt.val_loss}${acc}  (${evt.seconds}s)`]);
+          } else if (evt.type === 'status') {
+            setLogs((l) => [...l, `[status] ${evt.message ?? JSON.stringify(evt)}`]);
+            if (evt.status === 'done' || evt.status === 'failed' || evt.status === 'stopped') es.close();
+          } else if (evt.type === 'error') {
+            setLogs((l) => [...l, `[error] ${evt.message}`]);
+          } else if (evt.type === 'done') {
+            setLogs((l) => [...l, `[done] ${evt.message}`]);
+            es.close();
+            setJob((j) => (j ? { ...j, status: 'done' } : j));
+          }
+        } catch { /* 非 JSON 行忽略 */ }
+      };
+      es.onerror = () => {
+        setLogs((l) => [...l, '[连接断开]']);
+        es.close();
+      };
+      message.success(`训练已启动，模型 ID：${res.model_id}`);
+    } catch (e) {
+      const detail = e instanceof api.ApiError ? e.detail : null;
+      const msg = detail && typeof detail === 'object' && 'errors' in (detail as object)
+        ? (detail as { errors: { message: string }[] }).errors.map((x) => x.message).join('；')
+        : e instanceof Error ? e.message : '启动失败';
+      message.error({ content: `训练启动失败：${msg}`, duration: 6 });
+    } finally {
+      setStarting(false);
+    }
+  };
+
+  const stop = async () => {
+    if (!job) return;
+    await api.stopTraining(job.job_id);
+    setLogs((l) => [...l, '[已手动停止]']);
+  };
+
+  const ds = datasets.find((d) => d.id === dataset);
+
+  return (
+    <Modal
+      title="训练模型"
+      open={trainOpen}
+      onCancel={() => setTrainOpen(false)}
+      width={720}
+      footer={[
+        <Button key="close" onClick={() => setTrainOpen(false)}>关闭</Button>,
+        job && job.status === 'running' ? (
+          <Button key="stop" danger icon={<PauseCircleOutlined />} onClick={() => void stop()}>停止</Button>
+        ) : (
+          <Button key="start" type="primary" icon={<PlayCircleOutlined />}
+            loading={starting} onClick={() => void start()}>
+            开始训练
+          </Button>
+        ),
+        <Button key="models" onClick={() => { setTrainOpen(false); setModelsOpen(true); }}>
+          已训练模型列表
+        </Button>,
+      ]}
+    >
+      <Form layout="vertical" size="small">
+        <Form.Item label="模型 ID（训练完成后凭它在模型列表中查找）">
+          <Input value={modelId} onChange={(e) => setModelId(e.target.value)} placeholder="自动生成，可修改" />
+        </Form.Item>
+        <Form.Item label="数据集">
+          <Select value={dataset} onChange={setDataset}
+            options={datasets.map((d) => ({ value: d.id, label: `${d.name}（${d.task === 'regression' ? '回归' : '分类'}）` }))} />
+          {ds && <Alert type="info" showIcon style={{ marginTop: 6 }} message={ds.doc} />}
+        </Form.Item>
+        <Space size="large" wrap>
+          <Form.Item label="轮数 epochs"><InputNumber min={1} max={100} value={epochs} onChange={(v) => setEpochs(v ?? 3)} /></Form.Item>
+          <Form.Item label="批大小"><InputNumber min={1} max={1024} value={batchSize} onChange={(v) => setBatchSize(v ?? 32)} /></Form.Item>
+          <Form.Item label="学习率"><InputNumber min={0.00001} max={1} step={0.0001} value={lr} onChange={(v) => setLr(v ?? 0.001)} /></Form.Item>
+          <Form.Item label="样本数"><InputNumber min={32} max={20000} step={64} value={numSamples} onChange={(v) => setNumSamples(v ?? 512)} /></Form.Item>
+        </Space>
+      </Form>
+
+      {job && (
+        <div className="mf-train-log">
+          <Space style={{ marginBottom: 6 }}>
+            <Tag color={job.status === 'running' ? 'processing' : job.status === 'done' ? 'success' : 'error'}>
+              {job.status}
+            </Tag>
+            <span style={{ fontSize: 12, color: '#888' }}>模型 ID: {job.model_id}</span>
+            {job.status === 'running' && <Spin size="small" />}
+          </Space>
+          <div className="mf-train-log-body">
+            {logs.map((l, i) => <div key={i}>{l}</div>)}
+            <div ref={logEnd} />
+          </div>
+        </div>
+      )}
+    </Modal>
+  );
+}

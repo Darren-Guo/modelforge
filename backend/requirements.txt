@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+pydantic
+jinja2
+numpy
+pillow
+pyyaml
+python-multipart
+httpx
+torch
+torchvision

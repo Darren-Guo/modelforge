@@ -1,0 +1,280 @@
+html, body, #root {
+  margin: 0;
+  height: 100%;
+  font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+}
+
+.mf-app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background: #f5f6f8;
+}
+
+/* ---- 工具栏 ---- */
+.mf-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 14px;
+  background: #fff;
+  border-bottom: 1px solid #e5e7eb;
+  flex-wrap: wrap;
+}
+.mf-brand {
+  font-weight: 700;
+  font-size: 16px;
+  color: #1677ff;
+  white-space: nowrap;
+}
+
+/* ---- 主布局 ---- */
+.mf-main {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+.mf-left {
+  width: 250px;
+  min-width: 250px;
+  background: #fff;
+  border-right: 1px solid #e5e7eb;
+  overflow-y: auto;
+}
+.mf-center {
+  flex: 1;
+  min-width: 0;
+}
+.mf-right {
+  width: 300px;
+  min-width: 300px;
+  background: #fff;
+  border-left: 1px solid #e5e7eb;
+  overflow-y: auto;
+}
+.mf-canvas {
+  height: 100%;
+}
+
+/* ---- 左侧面板 ---- */
+.mf-palette {
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.mf-palette-collapse {
+  border: none;
+}
+.mf-palette-item {
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  padding: 6px 10px;
+  margin-bottom: 6px;
+  cursor: grab;
+  background: #fafafa;
+  transition: all .15s;
+}
+.mf-palette-item:hover {
+  border-color: #1677ff;
+  background: #eef4ff;
+  transform: translateY(-1px);
+}
+.mf-palette-label {
+  font-size: 13px;
+  font-weight: 500;
+}
+.mf-palette-shape {
+  font-size: 11px;
+  color: #999;
+  margin-top: 2px;
+}
+.mf-palette-hint {
+  font-size: 11px;
+  color: #999;
+  line-height: 1.7;
+  padding: 4px;
+}
+
+/* ---- 画布节点 ---- */
+.mf-node {
+  background: #fff;
+  border: 2px solid #1677ff;
+  border-radius: 8px;
+  font-size: 12px;
+  overflow: hidden;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, .08);
+}
+.mf-node.selected {
+  box-shadow: 0 0 0 3px rgba(22, 119, 255, .3);
+}
+.mf-node.error {
+  border-color: #ff4d4f !important;
+  box-shadow: 0 0 0 3px rgba(255, 77, 79, .25);
+}
+.mf-node-head {
+  color: #fff;
+  padding: 4px 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.mf-node-group {
+  font-size: 10px;
+  background: rgba(255, 255, 255, .25);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+.mf-node-label {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mf-node-name {
+  padding: 3px 10px 0;
+  font-weight: 500;
+  color: #333;
+}
+.mf-node-attrs {
+  padding: 0 10px 3px;
+  font-size: 10.5px;
+  color: #888;
+  font-family: Consolas, monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mf-node-ports {
+  padding: 2px 0 6px;
+}
+.mf-port-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  height: 22px;
+  padding: 0 10px;
+  position: relative;
+}
+.mf-port.in { color: #1677ff; }
+.mf-port.out { color: #eb2f96; }
+.mf-port-shape {
+  font-size: 10px;
+  color: #999;
+  font-family: Consolas, monospace;
+}
+
+/* ---- 右侧属性面板 ---- */
+.mf-props {
+  padding: 12px;
+}
+.mf-props-title {
+  font-weight: 700;
+  font-size: 14px;
+  margin-bottom: 10px;
+}
+.mf-props-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.mf-props-label {
+  font-size: 12px;
+  color: #666;
+  margin-top: 6px;
+}
+.mf-props-hint {
+  font-size: 11px;
+  color: #999;
+  line-height: 1.6;
+}
+.mf-attr-row {
+  margin-bottom: 6px;
+}
+.mf-port-edit-row {
+  border: 1px dashed #e5e7eb;
+  border-radius: 6px;
+  padding: 6px;
+  margin-bottom: 6px;
+}
+.mf-port-edit-line {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 4px;
+}
+.mf-shape-editor {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.mf-dim {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.mf-dtype-select {
+  height: 24px;
+  border-radius: 4px;
+  border: 1px solid #d9d9d9;
+  font-size: 12px;
+}
+
+/* ---- 训练日志 ---- */
+.mf-train-log {
+  margin-top: 12px;
+}
+.mf-train-log-body {
+  background: #1e1e1e;
+  color: #9cdcfe;
+  font-family: Consolas, monospace;
+  font-size: 12px;
+  padding: 10px;
+  border-radius: 6px;
+  height: 220px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+}
+
+/* ---- 源码查看 ---- */
+.mf-source-layout {
+  display: flex;
+  height: 100%;
+  gap: 8px;
+}
+.mf-source-tree {
+  width: 180px;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  overflow-y: auto;
+}
+.mf-source-tree .active {
+  background: #e6f4ff;
+}
+.mf-source-code {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+/* ---- 推理 ---- */
+.mf-infer-textarea {
+  width: 100%;
+  min-height: 62px;
+  border: 1px solid #d9d9d9;
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 12px;
+  font-family: inherit;
+  resize: vertical;
+  box-sizing: border-box;
+}
+.mf-infer-data {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
