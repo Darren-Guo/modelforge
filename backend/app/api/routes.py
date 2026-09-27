@@ -20,10 +20,12 @@ from ..ir.validate import validate_graph
 from ..registry.ops import OPS, AttrDef, OpDef
 from ..store import (
     delete_module, delete_model, get_model, get_module, list_models, list_modules,
-    list_trainings, new_id, record_training, save_module, GENERATED_DIR, RUNS_DIR,
+    new_id, record_training, save_module, GENERATED_DIR, RUNS_DIR,
 )
 from ..training import infer
-from ..training.jobs import JobNotFound, get_job, iter_events, list_jobs, start_job, stop_job
+from ..training.jobs import (
+    JobNotFound, JobNotRunning, get_job, iter_events, list_jobs, start_job, stop_job,
+)
 
 router = APIRouter(prefix="/api")
 
@@ -77,6 +79,29 @@ def _modules_map() -> dict[str, ModuleDef]:
         except Exception:
             continue
     return out
+
+
+def _module_json(m: dict[str, Any]) -> dict[str, Any]:
+    """与前端 ModuleDef 契约对齐：展开 data（inputs/outputs/graph 在顶层）。"""
+    return {**m["data"], "id": m["id"], "name": m["name"], "description": m["description"],
+            "created_at": m["created_at"], "updated_at": m["updated_at"]}
+
+
+def _reaches_module(graph: Graph, target_id: str, modules: dict[str, ModuleDef]) -> bool:
+    """DFS：graph 直接或间接引用 custom:target_id 则为 True（用于阻止自引用递归）。"""
+    seen: set[str] = set()
+    stack = [n.op.split(":", 1)[1] for n in graph.nodes if n.op.startswith("custom:")]
+    while stack:
+        mid = stack.pop()
+        if mid == target_id:
+            return True
+        if mid in seen:
+            continue
+        seen.add(mid)
+        ref = modules.get(mid)
+        if ref is not None:
+            stack.extend(n.op.split(":", 1)[1] for n in ref.graph.nodes if n.op.startswith("custom:"))
+    return False
 
 
 @router.post("/validate")
@@ -150,7 +175,7 @@ def api_get_module(module_id: str) -> dict[str, Any]:
     m = get_module(module_id)
     if not m:
         raise HTTPException(status_code=404, detail="模块不存在")
-    return m
+    return _module_json(m)
 
 
 @router.post("/modules")
@@ -167,12 +192,21 @@ def api_save_module(body: ModuleBody) -> dict[str, Any]:
     )
     if not mod.name:
         raise HTTPException(status_code=400, detail="模块名称不能为空")
-    # 保存前校验内部子图
-    report = validate_graph(mod.graph, {})
+    # 保存前校验内部子图：允许引用库中其他自定义模块（支持嵌套），
+    # 但排除自身 id 并检查引用链，避免直接/间接自引用造成递归定义
+    mods = _modules_map()
+    mods.pop(mod.id, None)
+    if _reaches_module(mod.graph, mod.id, mods):
+        raise HTTPException(status_code=400, detail={
+            "message": "模块不能直接或间接引用自身，会形成递归定义",
+            "report": {"ok": False, "errors": [{"where": mod.name, "message": "内部子图引用了自身"}],
+                       "warnings": [], "nodes": [], "order": []},
+        })
+    report = validate_graph(mod.graph, mods)
     if not report["ok"]:
         raise HTTPException(status_code=400, detail={"message": "内部子图校验未通过", "report": report})
     data = mod.model_dump(by_alias=True)
-    return save_module(body.id, mod.name, mod.description, data)
+    return _module_json(save_module(mod.id, mod.name, mod.description, data))
 
 
 @router.delete("/modules/{module_id}")
@@ -262,6 +296,8 @@ def api_stop_training(job_id: str) -> dict[str, Any]:
         return {"ok": True}
     except JobNotFound:
         raise HTTPException(status_code=404, detail="任务不存在")
+    except JobNotRunning:
+        raise HTTPException(status_code=409, detail="任务已结束，无法停止")
 
 
 @router.get("/trainings/{job_id}/logs")

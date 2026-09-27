@@ -1,12 +1,26 @@
 /** 左侧算子面板：基础算子 / 大模型模块 / 自定义模块 三组，拖拽或点击放置。 */
 import { useMemo, useState } from 'react';
-import { Collapse, Empty, Input, Tag, Tooltip, message } from 'antd';
-import { useGraphStore } from '../stores/graphStore';
+import { Button, Collapse, Empty, Input, Popconfirm, Space, Tag, Tooltip, message } from 'antd';
+import { useGraphStore, type ModuleNodeData } from '../stores/graphStore';
 import { fmtShape } from '../utils/shape';
 import * as api from '../api/client';
+import { apiErrorText } from './errors';
+import { beginModuleEdit } from './moduleEditSession';
 
 export default function Palette() {
-  const { ops, modules, addOpNode, addCustomNode } = useGraphStore();
+  // 性能：拖拽时 nodes 高频变化，这里只订阅低频切片；usage 派生成原语（位置变化不影响）
+  const ops = useGraphStore((s) => s.ops);
+  const modules = useGraphStore((s) => s.modules);
+  const customUsage = useGraphStore((s) => {
+    const counts: Record<string, number> = {};
+    for (const n of s.nodes) {
+      const op = (n.data as ModuleNodeData).op;
+      if (op && op.startsWith('custom:')) counts[op.slice(7)] = (counts[op.slice(7)] ?? 0) + 1;
+    }
+    return JSON.stringify(counts);
+  });
+  const usage: Record<string, number> = useMemo(
+    () => JSON.parse(customUsage || '{}'), [customUsage]);
   const [q, setQ] = useState('');
 
   const groups = useMemo(() => {
@@ -22,7 +36,9 @@ export default function Palette() {
 
   const dropAt = (i: number) => ({ x: 260 + (i % 3) * 60, y: 80 + (i % 8) * 60 });
 
-  const card = (key: string, label: string, doc: string, payload: object, onAdd: () => void, extra?: React.ReactNode, onDblClick?: () => void) => (
+  // 单击卡片 = 放置节点；「编辑定义 / 删除」是卡片上的显式按钮。
+  // 不再用「双击编辑」：浏览器双击必然先派发两次 click，会先放两个节点再进编辑器。
+  const card = (key: string, label: string, doc: string, payload: object, onAdd: () => void, extra?: React.ReactNode) => (
     <div
       key={key}
       className="mf-palette-item"
@@ -32,7 +48,6 @@ export default function Palette() {
         e.dataTransfer.effectAllowed = 'move';
       }}
       onClick={onAdd}
-      onDoubleClick={onDblClick}
     >
       <Tooltip title={doc} placement="right">
         <div>
@@ -45,10 +60,19 @@ export default function Palette() {
 
   const openModule = async (id: string) => {
     try {
-      const mod = await api.getModule(id);
-      useGraphStore.getState().startEditModule(mod);
+      beginModuleEdit(await api.getModule(id));
     } catch (e) {
-      message.error(e instanceof Error ? e.message : '打开模块失败');
+      message.error(`打开模块定义失败：${apiErrorText(e, '未知错误')}`);
+    }
+  };
+
+  const removeModule = async (id: string, name: string) => {
+    try {
+      await api.deleteModule(id);
+      await useGraphStore.getState().refreshModules();
+      message.success(`已删除模块「${name}」`);
+    } catch (e) {
+      message.error(`删除模块失败：${apiErrorText(e, '未知错误')}`);
     }
   };
 
@@ -70,14 +94,14 @@ export default function Palette() {
             label: <Tag color="blue">基础算子</Tag>,
             children: groups.basic.length ? groups.basic.map((o, i) =>
               card(o.op, o.label, o.doc, { op: o.op, group: 'basic' },
-                () => addOpNode(o.op, 'basic', dropAt(i)))) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} />,
+                () => useGraphStore.getState().addOpNode(o.op, 'basic', dropAt(i)))) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} />,
           },
           {
             key: 'llm',
             label: <Tag color="purple">大模型模块</Tag>,
             children: groups.llm.length ? groups.llm.map((o, i) =>
               card(o.op, o.label, o.doc, { op: o.op, group: 'llm' },
-                () => addOpNode(o.op, 'llm', dropAt(i)))) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} />,
+                () => useGraphStore.getState().addOpNode(o.op, 'llm', dropAt(i)))) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} />,
           },
           {
             key: 'custom',
@@ -85,13 +109,33 @@ export default function Palette() {
             children: groups.custom.length ? groups.custom.map((m, i) =>
               card(
                 m.id, m.name,
-                `${m.description || '（无描述）'}｜${m.node_count} 个内部节点｜双击编辑定义`,
+                `${m.description || '（无描述）'}｜${m.node_count} 个内部节点｜点「编辑定义」可回改`,
                 { op: m.id, group: 'custom', kind: 'custom' },
-                () => addCustomNode(m.id, dropAt(i)),
-                <div className="mf-palette-shape">
-                  入 {m.inputs.map((p) => fmtShape(p.shape)).join(' ')} → 出 {m.outputs.map((p) => fmtShape(p.shape)).join(' ')}
-                </div>,
-                () => void openModule(m.id),
+                () => useGraphStore.getState().addCustomNode(m.id, dropAt(i)),
+                <>
+                  <div className="mf-palette-shape">
+                    入 {m.inputs.map((p) => fmtShape(p.shape)).join(' ')} → 出 {m.outputs.map((p) => fmtShape(p.shape)).join(' ')}
+                  </div>
+                  <Space size={0}>
+                    <Button size="small" type="link"
+                      onClick={(e) => { e.stopPropagation(); void openModule(m.id); }}>
+                      编辑定义
+                    </Button>
+                    <Popconfirm
+                      title={`删除模块「${m.name}」？`}
+                      description={(usage[m.id] ?? 0) > 0
+                        ? `画布上有 ${usage[m.id] ?? 0} 个节点在使用，删除后它们将无法通过校验`
+                        : undefined}
+                      okText="删除"
+                      cancelText="取消"
+                      onConfirm={(e) => { e?.stopPropagation(); void removeModule(m.id, m.name); }}
+                    >
+                      <Button size="small" type="link" danger onClick={(e) => e.stopPropagation()}>
+                        删除
+                      </Button>
+                    </Popconfirm>
+                  </Space>
+                </>,
               )) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="框选子图后可保存为模块" />,
           },
         ]}

@@ -1,28 +1,56 @@
-"""代码生成管线：拓扑 JSON → 可运行的 PyTorch 代码包。
+"""代码生成管线：拓扑 JSON → 可运行的代码包。
 
 流程：图校验 → 形状推导 → 拓扑排序 → 逐节点渲染 Jinja2 模板 → 组装文件。
 
-生成产物（自包含，可独立运行）：
+生成产物（自包含，可独立运行；文件名由 TargetSpec 描述符决定）：
   model.py    — nn.Module（自定义模块生成为独立 class，组合引用）
   train.py    — 训练入口（内置数据集：mnist / text_cls / random）
   config.json — 拓扑快照
   README.md   — 使用说明
+
+代码生成目标（target）通过 OpDef 模板族（init_tpl/fwd_tpl 可按 target 索引）
+与 TargetSpec 描述符扩展；当前内置 "torch" 目标。
 """
 from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass, field
 from typing import Any
 
 from jinja2 import BaseLoader, Environment
 
 from ..ir.schema import Graph, ModuleDef
+from ..ir.shapes import ShapeError
 from ..ir.validate import GRAPH_IN, GRAPH_OUT, node_port_specs, validate_graph
-from ..registry.ops import HELPERS, OP_INDEX, pylit
+from ..registry.ops import HELPERS, OP_INDEX, OpDef, normalize_attrs, pylit, resolve_tpl
 
 _templates = Environment(loader=BaseLoader(), trim_blocks=True, lstrip_blocks=True)
 
-HELPER_ORDER = ["rmsnorm", "rope", "posemb"]
+
+# ---------------------------------------------------------------------------
+# 代码生成目标描述符：产物文件名与训练入口收敛于此（新增后端时补一条即可）
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class TargetSpec:
+    id: str
+    label: str
+    files: dict[str, str] = field(default_factory=dict)  # 角色 → 文件名
+    entry_file: str = ""   # 训练入口文件（jobs 等执行端按此解析）
+    entry_cmd: str = ""    # README 快速开始中的训练命令
+
+
+TARGETS: dict[str, TargetSpec] = {
+    "torch": TargetSpec(
+        id="torch",
+        label="PyTorch",
+        files={"model": "model.py", "train": "train.py",
+               "config": "config.json", "readme": "README.md"},
+        entry_file="train.py",
+        entry_cmd="python train.py --dataset random --epochs 3 --out ./run",
+    ),
+}
 
 
 class CodegenError(Exception):
@@ -98,6 +126,14 @@ def _unique(base: str, taken: set[str]) -> str:
     return name
 
 
+_HELPER_CLASS_RE = re.compile(r"^class (\w+)", re.M)
+
+
+def _helper_class_names() -> set[str]:
+    """从 HELPERS 源码里提取辅助类名（RMSNorm/RotaryEmbedding/...），用于命名保留。"""
+    return {m for src in HELPERS.values() for m in _HELPER_CLASS_RE.findall(src)}
+
+
 # ---------------------------------------------------------------------------
 # 自定义模块收集与命名
 # ---------------------------------------------------------------------------
@@ -140,6 +176,7 @@ def _render_class(
     class_name: str,
     doc: str,
     helpers_used: set[str],
+    target: str = "torch",
 ) -> str:
     report = validate_graph(graph, modules)
     if not report["ok"]:
@@ -148,10 +185,19 @@ def _render_class(
     nodes = {n.id: n for n in graph.nodes}
     edge_by_target = {(e.target.node, e.target.port): e for e in graph.edges}
 
+    # 命名去重：参数 / 子模块变量 / 前向局部变量共用 taken，
+    # sanitize 后的碰撞（如 "a b" 与 "a_b"）自动加后缀，避免共用同一变量。
+    taken: set[str] = {"_h"}  # 模板内部临时变量保留名
     arg_names: list[str] = []
-    taken: set[str] = set()
     for p in graph.inputs:
         arg_names.append(_unique(sanitize(p.name), taken))
+    node_var: dict[str, str] = {}
+    port_var: dict[tuple[str, str], str] = {}
+    for nid in order:
+        node_var[nid] = "m_" + _unique(sanitize(nid), taken)
+        _, outs = node_port_specs(nodes[nid], modules)
+        for p in outs:
+            port_var[(nid, p.name)] = "v_" + _unique(f"{sanitize(nid)}_{sanitize(p.name)}", taken)
 
     def src_var(tgt_node: str, tgt_port: str) -> str:
         e = edge_by_target.get((tgt_node, tgt_port))
@@ -163,16 +209,16 @@ def _render_class(
             })
         if e.source.node == GRAPH_IN:
             return arg_names[[p.name for p in graph.inputs].index(e.source.port)]
-        return f"v_{sanitize(e.source.node)}_{sanitize(e.source.port)}"
+        return port_var[(e.source.node, e.source.port)]
 
     init_lines: list[str] = []
     fwd_lines: list[str] = []
     for nid in order:
         n = nodes[nid]
-        var = f"m_{sanitize(nid)}"
+        var = node_var[nid]
         ins, outs = node_port_specs(n, modules)
         in_ctx = {p.name: src_var(nid, p.name) for p in ins}
-        out_ctx = {p.name: f"v_{sanitize(nid)}_{sanitize(p.name)}" for p in outs}
+        out_ctx = {p.name: port_var[(nid, p.name)] for p in outs}
 
         if n.op.startswith("custom:"):
             mid = n.op.split(":", 1)[1]
@@ -183,9 +229,17 @@ def _render_class(
                              else f"{out_ctx[outs[0].name]} = self.{var}({in_vars})")
         else:
             op = OP_INDEX[n.op]
-            ctx = {"var": var, "in": in_ctx, "out": out_ctx, "attrs": _wrap_attrs(n.attrs)}
-            init_lines.append(_render(op.init_tpl, **ctx))
-            fwd_lines.append(_render(op.fwd_tpl, **ctx))
+            attrs = normalize_attrs(op, n.attrs)[0]  # 校验已通过，此处补默认值保证模板不渲染空值
+            ctx = {"var": var, "in": in_ctx, "out": out_ctx, "attrs": _wrap_attrs(attrs)}
+            try:
+                init_lines.append(_render(resolve_tpl(op.init_tpl, op.op, "初始化", target), **ctx))
+                fwd_lines.append(_render(resolve_tpl(op.fwd_tpl, op.op, "前向", target), **ctx))
+            except ShapeError as e:
+                raise CodegenError({
+                    "ok": False,
+                    "errors": [{"where": n.name or n.id, "message": str(e)}],
+                    "warnings": [], "nodes": [], "order": [],
+                }) from None
             if op.helper:
                 helpers_used.add(op.helper)
 
@@ -232,6 +286,7 @@ def _render_custom_classes(
     helpers_used: set[str],
     memo: dict[str, str],
     done: list[str],
+    target: str = "torch",
 ) -> None:
     """依赖优先（内层模块先生成）渲染全部自定义模块 class。"""
     for n in graph.nodes:
@@ -240,13 +295,14 @@ def _render_custom_classes(
             if mid in done:
                 continue
             _render_custom_classes(modules[mid].graph, modules, customs, class_names,
-                                   helpers_used, memo, done)
+                                   helpers_used, memo, done, target)
             if mid not in done:
                 mod = modules[mid]
                 memo[mid] = _render_class(
                     mod.graph, modules, class_names, class_names[mid],
                     f"自定义模块「{mod.name}」：{mod.description or '（无描述）'}",
                     helpers_used,
+                    target,
                 )
                 done.append(mid)
 
@@ -259,8 +315,14 @@ def _python_literal(v: Any) -> str:
     return json.dumps(v, ensure_ascii=False)
 
 
-def generate_package(graph: Graph, modules: dict[str, ModuleDef] | None = None) -> dict[str, str]:
-    """生成完整代码包，返回 {文件名: 内容}。"""
+def generate_package(graph: Graph, modules: dict[str, ModuleDef] | None = None,
+                     target: str = "torch") -> dict[str, str]:
+    """生成完整代码包，返回 {文件名: 内容}（文件名由 TARGETS[target] 描述符决定）。"""
+    if target not in TARGETS:
+        raise CodegenError({"ok": False, "errors": [
+            {"where": "target", "message": f"未知代码生成目标「{target}」，可用：{'、'.join(TARGETS)}"}],
+            "warnings": [], "nodes": [], "order": []})
+    spec = TARGETS[target]
     modules = modules or {}
     report = validate_graph(graph, modules)
     if not report["ok"]:
@@ -273,21 +335,29 @@ def generate_package(graph: Graph, modules: dict[str, ModuleDef] | None = None) 
     helpers_used: set[str] = set()
     memo: dict[str, str] = {}
     done: list[str] = []
-    _render_custom_classes(graph, modules, customs, class_names, helpers_used, memo, done)
+    _render_custom_classes(graph, modules, customs, class_names, helpers_used, memo, done, target)
 
-    model_name = sanitize(graph.model.name or "GeneratedModel")
-    if model_name in set(class_names.values()) or model_name in _PY_KEYWORDS:
+    # 模型类名不得覆盖自定义模块类名 / 辅助类名 / 关键字
+    reserved = set(class_names.values()) | _PY_KEYWORDS | _helper_class_names()
+    base_name = sanitize(graph.model.name or "GeneratedModel")
+    model_name = base_name
+    for _ in range(4):
+        if model_name not in reserved:
+            break
         model_name += "Model"
+    if model_name in reserved:
+        model_name = _unique(base_name, reserved)
 
     model_class_code = _render_class(
         graph, modules, class_names, model_name,
         f"模型「{graph.model.name}」：{graph.model.description or '（无描述）'}"
         " — 由 ModelForge 可视化拼接工具生成",
         helpers_used,
+        target,
     )
 
-    # model.py
-    blocks = [HELPERS[h] for h in HELPER_ORDER if h in helpers_used]
+    # model.py：辅助类按 HELPERS 键序注入（名单从 OPS 的 helper 引用推导，无第二份清单）
+    blocks = [HELPERS[h] for h in HELPERS if h in helpers_used]
     blocks += [memo[mid] for mid in done]
     blocks.append(model_class_code)
     model_py = _templates.from_string(MODEL_PY_TPL).render(
@@ -296,8 +366,8 @@ def generate_package(graph: Graph, modules: dict[str, ModuleDef] | None = None) 
     )
 
     # train.py
-    input_specs = [{"name": p.name, "dtype": p.dtype, "shape": p.shape} for p in graph.inputs]
-    output_specs = [{"name": p.name, "dtype": p.dtype, "shape": p.shape} for p in graph.outputs]
+    input_specs = [{"name": p.name, "dtype": p.dtype or "float32", "shape": p.shape} for p in graph.inputs]
+    output_specs = [{"name": p.name, "dtype": p.dtype or "float32", "shape": p.shape} for p in graph.outputs]
     train_py = _templates.from_string(TRAIN_PY_TPL).render(
         class_name=model_name,
         input_specs=_python_literal(input_specs),
@@ -310,6 +380,7 @@ def generate_package(graph: Graph, modules: dict[str, ModuleDef] | None = None) 
         "version": graph.version,
         "generated_by": "ModelForge",
         "model_class": model_name,
+        "target": target,
         **graph.model_dump(by_alias=True, exclude={"format", "version"}),
     }
     config_json = json.dumps(config, ensure_ascii=False, indent=2)
@@ -317,30 +388,32 @@ def generate_package(graph: Graph, modules: dict[str, ModuleDef] | None = None) 
     readme = (
         f"# {graph.model.name}\n\n"
         f"{graph.model.description or '（无描述）'}\n\n"
-        "由 ModelForge 可视化拼接工具生成。\n\n"
+        f"由 ModelForge 可视化拼接工具生成（目标：{spec.label}）。\n\n"
         "## 文件\n\n"
-        "- `model.py` — 模型定义（`" + model_name + "`）\n"
-        "- `train.py` — 训练入口\n"
-        "- `config.json` — 拓扑快照\n\n"
+        f"- `{spec.files['model']}` — 模型定义（`" + model_name + "`）\n"
+        f"- `{spec.files['train']}` — 训练入口\n"
+        f"- `{spec.files['config']}` — 拓扑快照\n\n"
         "## 快速开始\n\n"
         "```bash\n"
-        "python -c \"import torch; from model import " + model_name + "; "
+        "python -c \"import torch; from " + spec.files["model"].rsplit(".", 1)[0] + " import "
+        + model_name + "; "
         "m = " + model_name + "(); print(m)\"\n"
-        "python train.py --dataset random --epochs 3 --out ./run\n"
+        + spec.entry_cmd + "\n"
         "```\n\n"
-        "内置数据集：`random`（随机张量拟合，任意结构可跑）、`mnist`（图像分类）、"
-        "`text_cls`（合成文本分类）。\n"
+        "内置数据集：`random`（随机张量拟合，任意结构可跑，多输出按各输出分别求损失）、"
+        "`mnist`（图像分类）、`text_cls`（合成文本分类）。\n"
     )
 
     return {
-        "model.py": model_py,
-        "train.py": train_py,
-        "config.json": config_json,
-        "README.md": readme,
+        spec.files["model"]: model_py,
+        spec.files["train"]: train_py,
+        spec.files["config"]: config_json,
+        spec.files["readme"]: readme,
     }
 
 
-def node_snippet(graph: Graph, node_id: str, modules: dict[str, ModuleDef] | None = None) -> dict[str, str]:
+def node_snippet(graph: Graph, node_id: str, modules: dict[str, ModuleDef] | None = None,
+                 target: str = "torch") -> dict[str, str]:
     """双击节点查看源码：自定义模块 → 整个 class；算子 → 初始化 + 前向片段。"""
     modules = modules or {}
     node = next((n for n in graph.nodes if n.id == node_id), None)
@@ -349,26 +422,40 @@ def node_snippet(graph: Graph, node_id: str, modules: dict[str, ModuleDef] | Non
 
     if node.op.startswith("custom:"):
         mid = node.op.split(":", 1)[1]
-        mod = modules[mid]
+        mod = modules.get(mid)
+        if mod is None:
+            raise CodegenError({"ok": False, "errors": [
+                {"where": node.name or node.id, "message": f"自定义模块 {mid} 不存在"}],
+                "warnings": [], "nodes": [], "order": []})
         customs: dict[str, ModuleDef] = {}
         _collect_custom(graph, modules, customs)
         class_names = _assign_class_names(customs)
         helpers_used: set[str] = set()
         memo: dict[str, str] = {}
         done: list[str] = []
-        _render_custom_classes(graph, modules, customs, class_names, helpers_used, memo, done)
+        _render_custom_classes(graph, modules, customs, class_names, helpers_used, memo, done, target)
         code = "\n\n".join([memo[d] for d in done])
         return {"kind": "class", "title": f"自定义模块 {mod.name}", "code": code}
 
-    op = OP_INDEX[node.op]
+    op = OP_INDEX.get(node.op)
+    if op is None:
+        raise CodegenError({"ok": False, "errors": [
+            {"where": node.name or node.id, "message": f"未知算子: {node.op}"}],
+            "warnings": [], "nodes": [], "order": []})
+    attrs = normalize_attrs(op, node.attrs)[0]  # 缺失属性回填默认值，片段永远是合法代码
     ctx = {
         "var": "block",
         "in": {p.name: f"x_{p.name}" for p in op.inputs},  # type: ignore[attr-defined]
         "out": {p.name: f"y_{p.name}" for p in op.outputs},  # type: ignore[attr-defined]
-        "attrs": _wrap_attrs(node.attrs),
+        "attrs": _wrap_attrs(attrs),
     }
-    init_code = _render(op.init_tpl, **ctx)
-    fwd_code = _render(op.fwd_tpl, **ctx)
+    try:
+        init_code = _render(resolve_tpl(op.init_tpl, op.op, "初始化", target), **ctx)
+        fwd_code = _render(resolve_tpl(op.fwd_tpl, op.op, "前向", target), **ctx)
+    except ShapeError as e:
+        raise CodegenError({"ok": False, "errors": [
+            {"where": node.name or node.id, "message": str(e)}],
+            "warnings": [], "nodes": [], "order": []}) from None
     code = (
         f"# {op.label} — {node.name or node.id}\n"
         f"# {op.doc}\n\n"
@@ -427,6 +514,8 @@ from model import {{ class_name }} as GeneratedModel
 
 INPUT_SPECS = {{ input_specs }}
 OUTPUT_SPECS = {{ output_specs }}
+N_IN = len(INPUT_SPECS)
+N_OUT = len(OUTPUT_SPECS)
 
 
 def log(obj: dict) -> None:
@@ -448,7 +537,7 @@ def check_classification_io(dataset_name: str) -> int:
 
 
 def build_random(n: int, seed: int):
-    """随机张量拟合：任意结构都能冒烟训练（MSE）。"""
+    """随机张量拟合：任意结构都能冒烟训练（各输出分别 MSE，多输出取损失之和）。"""
     g = torch.Generator().manual_seed(seed)
     xs = []
     for spec in INPUT_SPECS:
@@ -457,9 +546,21 @@ def build_random(n: int, seed: int):
             xs.append(torch.randint(0, 100, shape))
         else:
             xs.append(torch.randn(shape, generator=g))
-    out_shape = [n] + [dim_value(d) for d in OUTPUT_SPECS[0]["shape"][1:]]
-    ys = torch.randn(out_shape, generator=g)
-    return TensorDataset(*xs, ys), "regression"
+    ys = [torch.randn([n] + [dim_value(d) for d in spec["shape"][1:]], generator=g)
+          for spec in OUTPUT_SPECS]
+    return TensorDataset(*xs, *ys), "regression"
+
+
+def split_batch(batch):
+    """TensorDataset 批次 → (输入张量列表, 输出张量列表)。"""
+    tensors = list(batch)
+    return tensors[:N_IN], tensors[N_IN:]
+
+
+def compute_loss(criterion, task, outs, ys):
+    if task == "classification":
+        return criterion(outs[0], ys[0])
+    return sum(criterion(o, y.to(o.dtype)) for o, y in zip(outs, ys))
 
 
 def build_mnist(n: int, data_dir: str):
@@ -588,18 +689,20 @@ def main() -> None:
         t0 = time.time()
         total_loss, total_correct, total_count = 0.0, 0, 0
         for batch in train_loader:
-            *xs, y = batch
+            xs, ys = split_batch(batch)
             xs = [x.to(device) for x in xs]
-            y = y.to(device)
+            ys = [y.to(device) for y in ys]
             optim.zero_grad()
-            out = model(*xs)
-            loss = criterion(out, y if task == "classification" else y.to(out.dtype))
+            outs = model(*xs)
+            if not isinstance(outs, tuple):
+                outs = (outs,)
+            loss = compute_loss(criterion, task, outs, ys)
             loss.backward()
             optim.step()
-            total_loss += loss.item() * y.shape[0]
+            total_loss += loss.item() * ys[0].shape[0]
             if task == "classification":
-                total_correct += (out.argmax(dim=-1) == y).sum().item()
-            total_count += y.shape[0]
+                total_correct += (outs[0].argmax(dim=-1) == ys[0]).sum().item()
+            total_count += ys[0].shape[0]
         train_loss = total_loss / max(1, total_count)
         train_acc = total_correct / max(1, total_count) if task == "classification" else None
 
@@ -607,15 +710,17 @@ def main() -> None:
         val_loss, val_correct, val_count = 0.0, 0, 0
         with torch.no_grad():
             for batch in val_loader:
-                *xs, y = batch
+                xs, ys = split_batch(batch)
                 xs = [x.to(device) for x in xs]
-                y = y.to(device)
-                out = model(*xs)
-                loss = criterion(out, y if task == "classification" else y.to(out.dtype))
-                val_loss += loss.item() * y.shape[0]
+                ys = [y.to(device) for y in ys]
+                outs = model(*xs)
+                if not isinstance(outs, tuple):
+                    outs = (outs,)
+                loss = compute_loss(criterion, task, outs, ys)
+                val_loss += loss.item() * ys[0].shape[0]
                 if task == "classification":
-                    val_correct += (out.argmax(dim=-1) == y).sum().item()
-                val_count += y.shape[0]
+                    val_correct += (outs[0].argmax(dim=-1) == ys[0]).sum().item()
+                val_count += ys[0].shape[0]
         val_loss /= max(1, val_count)
         val_acc = val_correct / max(1, val_count) if task == "classification" else None
 

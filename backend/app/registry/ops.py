@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Sequence, Union
 
 from ..ir.schema import Dim
 from ..ir.shapes import (
@@ -26,6 +26,9 @@ from ..ir.shapes import (
 )
 
 ShapeRule = Callable[[dict[str, Any], list[list[Dim]]], list[list[Dim]]]
+
+# 模板族：str 是 torch 目标的简写；dict 按 target id 索引（如 {"torch": ..., "cpp": ...}）
+Template = Union[str, dict]
 
 
 @dataclass
@@ -57,9 +60,83 @@ class OpDef:
     inputs: list[PortDef]
     outputs: list[PortDef]
     shape_rule: ShapeRule
-    init_tpl: str
-    fwd_tpl: str
+    init_tpl: Template
+    fwd_tpl: Template
     helper: str = ""  # 注入生成文件的辅助类代码（如 RMSNorm、RoPE）
+    attr_check: Callable[[dict[str, Any]], None] | None = None  # 纯属性交叉约束（如整除、奇偶）
+
+
+def resolve_tpl(tpl: Template, op: str, kind: str, target: str = "torch") -> str:
+    """按 target 解析算子模板；str 视为 torch 目标简写。"""
+    table: dict[str, str] = {"torch": tpl} if isinstance(tpl, str) else dict(tpl)
+    if target not in table:
+        raise ShapeError(f"算子 {op} 缺少 {target} 目标的{kind}模板")
+    return table[target]
+
+
+def normalize_attrs(op: OpDef, attrs: dict[str, Any]) -> tuple[dict[str, Any], list[str], list[str]]:
+    """补全缺失属性（回填 AttrDef.default）并按 AttrDef 校验取值。
+
+    返回 (完整属性, 错误列表, 警告列表)：
+    - 缺失键：报错 + 回填默认值（避免把空值渲染进模板产出非法代码）
+    - 类型/min/max/choices 不合法：报错（保留原值，交由校验报告展示）
+    - 未知键：warning（不阻断，容忍旧拓扑/前端扩展字段）
+    """
+    out: dict[str, Any] = {}
+    errors: list[str] = []
+    warnings: list[str] = []
+    known = {a.name: a for a in op.attrs}
+    for a in op.attrs:
+        if a.name not in attrs:
+            errors.append(f"缺少属性「{a.name}」（{a.label}），已回填默认值 {pylit(a.default)}")
+            out[a.name] = list(a.default) if isinstance(a.default, list) else a.default
+            continue
+        v = attrs[a.name]
+        bad = _check_attr_value(a, v)
+        if bad:
+            errors.append(bad)
+            out[a.name] = list(a.default) if isinstance(a.default, list) else a.default
+        else:
+            out[a.name] = v
+    for k in attrs:
+        if k not in known:
+            warnings.append(f"未知属性「{k}」（算子 {op.op} 未定义），生成代码将忽略")
+    return out, errors, warnings
+
+
+def _check_attr_value(a: AttrDef, v: Any) -> str | None:
+    """校验单个属性值，返回错误消息或 None。"""
+    t = a.type
+    if t == "int":
+        if isinstance(v, bool) or not isinstance(v, int):
+            if isinstance(v, float) and v.is_integer():
+                pass  # 4.0 → 容忍
+            else:
+                return f"属性「{a.name}」应为整数，实际 {pylit(v)}（{type(v).__name__}）"
+    elif t == "float":
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return f"属性「{a.name}」应为数字，实际 {pylit(v)}（{type(v).__name__}）"
+    elif t == "bool":
+        if not isinstance(v, bool):
+            return f"属性「{a.name}」应为布尔值，实际 {pylit(v)}（{type(v).__name__}）"
+    elif t == "str":
+        if not isinstance(v, str):
+            return f"属性「{a.name}」应为字符串，实际 {pylit(v)}（{type(v).__name__}）"
+    elif t == "enum":
+        if not isinstance(v, str) or (a.choices and v not in a.choices):
+            return f"属性「{a.name}」应为 {'/'.join(a.choices or [])} 之一，实际 {pylit(v)}"
+    elif t == "int_list":
+        if not isinstance(v, (list, tuple)):
+            return f"属性「{a.name}」应为整数列表，实际 {pylit(v)}（{type(v).__name__}）"
+        for item in v:
+            if isinstance(item, bool) or not isinstance(item, int):
+                return f"属性「{a.name}」应为整数列表，实际含 {pylit(item)}（{type(item).__name__}）"
+    if t in ("int", "float") and isinstance(v, (int, float)) and not isinstance(v, bool):
+        if a.min is not None and v < a.min:
+            return f"属性「{a.name}」不能小于 {a.min}，实际 {v}"
+        if a.max is not None and v > a.max:
+            return f"属性「{a.name}」不能大于 {a.max}，实际 {v}"
+    return None
 
 
 def pylit(v: Any) -> str:
@@ -93,6 +170,73 @@ def _seq_like(attrs: dict, ins: list[list[Dim]], feature: int) -> list[list[Dim]
     assert_rank(s, 3, "序列模块")
     assert_dim(s, -1, feature, "序列模块")
     return [list(s)]
+
+
+def _softmax_shape(attrs: dict, ins: list[list[Dim]]) -> list[list[Dim]]:
+    s = ins[0]
+    d = attrs["dim"]
+    rank = len(s)
+    norm = d + rank if d < 0 else d
+    if not (0 <= norm < rank):
+        raise ShapeError(f"Softmax: dim={d} 超出输入秩 {rank}（{fmt_shape(s)}）")
+    return [list(s)]
+
+
+def _reshape_shape(attrs: dict, ins: list[list[Dim]]) -> list[list[Dim]]:
+    """Reshape：-1 至多一个；能算元素数时校验整除；keep_batch 与 fwd 模板一致。"""
+    s = ins[0]
+    target = list(attrs["target_shape"])
+    for d in target:
+        if isinstance(d, bool) or not isinstance(d, int):
+            raise ShapeError(f"Reshape: target_shape 只支持整数（-1 表示推断），实际 {target}")
+        if d < -1:
+            raise ShapeError(f"Reshape: target_shape 含非法维度 {d}（仅 -1 表示自动推断）")
+    n_inf = sum(1 for d in target if d == -1)
+    if n_inf > 1:
+        raise ShapeError("Reshape: target_shape 最多只能有一个 -1（自动推断维）")
+    keep = bool(attrs["keep_batch"])
+    if keep and len(s) < 1:
+        raise ShapeError(f"Reshape: keep_batch=True 需要至少 1 维输入，实际 {fmt_shape(s)}")
+    out: list[Dim] = [s[0]] if keep else []
+    out += [d if d != -1 else "inferred" for d in target]
+    # 元素数校验（输入全为静态维时可算）
+    if all(isinstance(d, int) and not isinstance(d, bool) for d in s):
+        n_in = 1
+        for d in s:
+            n_in *= int(d)
+        known = 1
+        for d in out:
+            if d != "inferred":
+                known *= int(d)
+        if n_inf == 0:
+            if n_in != known:
+                raise ShapeError(
+                    f"Reshape: 元素数不匹配，输入 {fmt_shape(s)}（{n_in}）→ 目标 {fmt_shape(out)}（{known}）")
+        elif known == 0 or n_in % known != 0:
+            raise ShapeError(
+                f"Reshape: -1 无法整除推断，输入 {fmt_shape(s)}（{n_in}）→ 目标 {fmt_shape(out)}")
+    return [out]
+
+
+def _divisible(dim_key: str, heads_key: str, op: str) -> Callable[[dict[str, Any]], None]:
+    """attr_check：embed_dim/d_model 必须能被头数整除。"""
+
+    def check(a: dict[str, Any]) -> None:
+        dim, heads = a[dim_key], a[heads_key]
+        if heads and dim % heads != 0:
+            raise ShapeError(f"{op}: {dim_key}={dim} 必须能被 {heads_key}={heads} 整除")
+
+    return check
+
+
+def _rope_attr_check(a: dict[str, Any]) -> None:
+    if a["dim"] % 2 != 0:
+        raise ShapeError(f"RoPE: dim 必须为偶数，实际 {a['dim']}")
+
+
+def _posemb_attr_check(a: dict[str, Any]) -> None:
+    if a["kind"] == "sinusoidal" and a["d_model"] % 2 != 0:
+        raise ShapeError(f"PositionalEncoding: kind=sinusoidal 要求 d_model 为偶数，实际 {a['d_model']}")
 
 
 # ---------------------------------------------------------------------------
@@ -327,7 +471,7 @@ OPS: list[OpDef] = [
         attrs=[AttrDef("dim", "int", -1, "作用轴")],
         inputs=[PortDef("x", "float32")],
         outputs=[PortDef("y", "float32")],
-        shape_rule=_identity,
+        shape_rule=_softmax_shape,
         init_tpl="self.{{ var }} = nn.Softmax(dim={{ attrs.dim }})",
         fwd_tpl="{{ out.y }} = self.{{ var }}({{ in.x }})",
     ),
@@ -398,11 +542,7 @@ OPS: list[OpDef] = [
                AttrDef("keep_batch", "bool", True, "保留 batch 维")],
         inputs=[PortDef("x", "float32")],
         outputs=[PortDef("y", "float32")],
-        shape_rule=lambda a, ins: [
-            [ins[0][0], *[d if d != -1 else "inferred" for d in a["target_shape"]]]
-            if a["keep_batch"] and len(ins[0]) >= 1
-            else [d if d != -1 else "inferred" for d in a["target_shape"]]
-        ],
+        shape_rule=_reshape_shape,
         init_tpl="# Reshape 无参数",
         fwd_tpl=(
             "{% if attrs.keep_batch %}"
@@ -457,12 +597,13 @@ OPS: list[OpDef] = [
         fwd_tpl=(
             "{{ out.y }}, _ = self.{{ var }}({{ in.x }}, {{ in.x }}, {{ in.x }}, need_weights=False)"
         ),
+        attr_check=_divisible("embed_dim", "num_heads", "MultiHeadAttention"),
     ),
     OpDef(
         op="LSTM",
         group="basic",
         label="LSTM",
-        doc="循环网络。输入 [.., seq, input_size]，输出最后一维变为 hidden_size * 方向数。",
+        doc="循环网络。输入 [.., seq, input_size]（支持 2 维非批 [seq, input_size]），输出最后一维变为 hidden_size * 方向数。",
         attrs=[
             AttrDef("input_size", "int", 768, "输入特征", min=1),
             AttrDef("hidden_size", "int", 256, "隐藏维度", min=1),
@@ -513,6 +654,7 @@ OPS: list[OpDef] = [
         init_tpl="self.{{ var }} = RotaryEmbedding({{ attrs.dim }}, base={{ attrs.base }})",
         fwd_tpl="{{ out.y }} = self.{{ var }}({{ in.x }})",
         helper="rope",
+        attr_check=_rope_attr_check,
     ),
     # -----------------------------------------------------------------------
     # 大模型模块
@@ -536,6 +678,7 @@ OPS: list[OpDef] = [
         shape_rule=lambda a, ins: _seq_like(a, ins, a["d_model"]),
         init_tpl="self.{{ var }} = nn.TransformerEncoderLayer({{ attrs.d_model }}, {{ attrs.nhead }}, dim_feedforward={{ attrs.dim_feedforward }}, dropout={{ attrs.dropout }}, activation={{ attrs.activation }}, layer_norm_eps={{ attrs.layer_norm_eps }}, batch_first={{ attrs.batch_first }})",
         fwd_tpl="{{ out.y }} = self.{{ var }}({{ in.x }})",
+        attr_check=_divisible("d_model", "nhead", "TransformerEncoderLayer"),
     ),
     OpDef(
         op="TransformerDecoderLayer",
@@ -561,6 +704,7 @@ OPS: list[OpDef] = [
         ),
         init_tpl="self.{{ var }} = nn.TransformerDecoderLayer({{ attrs.d_model }}, {{ attrs.nhead }}, dim_feedforward={{ attrs.dim_feedforward }}, dropout={{ attrs.dropout }}, activation={{ attrs.activation }}, layer_norm_eps={{ attrs.layer_norm_eps }}, batch_first={{ attrs.batch_first }})",
         fwd_tpl="{{ out.y }} = self.{{ var }}({{ in.tgt }}, {{ in.memory }})",
+        attr_check=_divisible("d_model", "nhead", "TransformerDecoderLayer"),
     ),
     OpDef(
         op="MLP",
@@ -606,6 +750,7 @@ OPS: list[OpDef] = [
         init_tpl="self.{{ var }} = PositionalEncoding({{ attrs.d_model }}, max_len={{ attrs.max_len }}, kind={{ attrs.kind }}, dropout={{ attrs.dropout }}, batch_first={{ attrs.batch_first }})",
         fwd_tpl="{{ out.y }} = self.{{ var }}({{ in.x }})",
         helper="posemb",
+        attr_check=_posemb_attr_check,
     ),
     OpDef(
         op="TokenEmbedding",
@@ -675,6 +820,7 @@ OPS: list[OpDef] = [
             "_h, _ = self.{{ var }}_attn(_h, _h, _h, need_weights=False)\n"
             "{{ out.y }} = {{ in.x }} + _h + self.{{ var }}_mlp(self.{{ var }}_norm2({{ in.x }} + _h))"
         ),
+        attr_check=_divisible("dim", "num_heads", "ViTBlock"),
     ),
     OpDef(
         op="ResNetBlock",
@@ -763,13 +909,15 @@ def _concat_shape(ins: list[list[Dim]], dim: int) -> list[Dim]:
             else:
                 out.append(f"cat_{a[i]}_{b[i]}")
         else:
-            out.append(merge_shapes([a[i]], [b[i]], "Concat")[0])
+            # torch.cat 不广播：非拼接轴必须精确同形
+            out.append(merge_shapes([a[i]], [b[i]], "Concat", broadcast=False)[0])
     return out
 
 
 def _rnn_shape(attrs: dict, ins: list[list[Dim]], op: str) -> list[list[Dim]]:
+    """torch 2.x 支持非批输入 [L, H_in]（2 维）与批输入 [.., L/S, H_in]（3 维+）。"""
     s = ins[0]
-    assert_rank(s, 3, op)
+    assert_min_rank(s, 2, op)
     assert_dim(s, -1, attrs["input_size"], op)
     directions = 2 if attrs["bidirectional"] else 1
     return [list(s[:-1]) + [attrs["hidden_size"] * directions]]

@@ -1,10 +1,13 @@
 /** 右侧属性面板：模型元信息 / 节点参数与端口 / 连线信息 / 自定义模块编辑条。 */
-import { Button, Divider, Empty, Input, InputNumber, Popconfirm, Select, Switch, Tag } from 'antd';
+import { Button, Divider, Empty, Input, InputNumber, Popconfirm, Select, Switch, Tag, message } from 'antd';
 import { DeleteOutlined, PlusOutlined, SaveOutlined, StopOutlined } from '@ant-design/icons';
-import { useGraphStore, type ModuleNodeData } from '../stores/graphStore';
+import { useGraphStore, type IONodeData, type ModuleNodeData, type RFEdge, type RFNode } from '../stores/graphStore';
 import type { AttrDef, Dim, Dtype, ModuleDef, Port } from '../schema/graph';
 import { GRAPH_IN, GRAPH_OUT } from '../schema/graph';
 import { fmtShape } from '../utils/shape';
+import * as api from '../api/client';
+import { apiErrorText } from './errors';
+import { beginModuleEdit, endModuleEdit } from './moduleEditSession';
 
 const DTYPES: Dtype[] = ['float32', 'float16', 'int64', 'int32', 'bool'];
 
@@ -118,8 +121,94 @@ function AttrField({ def, value, onChange }: {
 }
 
 export default function PropPanel() {
-  const store = useGraphStore();
-  const { nodes, edges, selectedNodeIds, selectedEdgeIds, opIndex, moduleIndex, modelMeta, editing } = store;
+  // 性能：拖拽时 nodes/edges 每帧换新对象——仅订阅面板需要的切片；
+  // 选中节点订阅其 data 引用（拖拽只改 position，不触发面板重渲染）。
+  // 动作经 getState() 快照调用（引用稳定，store.xxx() 调用点不变）。
+  const store = useGraphStore.getState();
+  const selectedNodeIds = useGraphStore((s) => s.selectedNodeIds);
+  const opIndex = useGraphStore((s) => s.opIndex);
+  const moduleIndex = useGraphStore((s) => s.moduleIndex);
+  const modelMeta = useGraphStore((s) => s.modelMeta);
+  const editing = useGraphStore((s) => s.editing);
+  const isEmptyCanvas = useGraphStore((s) => s.nodes.length === 0);
+  const selectedNodeData = useGraphStore((s) =>
+    s.selectedNodeIds.length === 1 ? s.nodes.find((n) => n.id === s.selectedNodeIds[0])?.data : undefined);
+  const selectedEdge = useGraphStore((s) =>
+    s.selectedEdgeIds.length === 1 ? s.edges.find((e) => e.id === s.selectedEdgeIds[0]) : undefined);
+  const selectedNode = selectedNodeData && selectedNodeIds.length === 1
+    ? ({ id: selectedNodeIds[0], data: selectedNodeData } as RFNode)
+    : undefined;
+
+  /** 打开自定义模块编辑器：模块索引里只有摘要，必须先取全量定义（否则 startEditModule 遍历 graph.nodes 崩溃）。 */
+  const openModuleDef = async (id: string) => {
+    try {
+      beginModuleEdit(await api.getModule(id));
+    } catch (e) {
+      message.error(`打开模块定义失败：${apiErrorText(e, '未知错误')}`);
+    }
+  };
+
+  /** 保存模块定义：失败（如内部子图校验 400）时保持编辑态并报告原因。 */
+  const saveEdit = async () => {
+    const name = editing?.name ?? '';
+    try {
+      await store.saveEditModule();
+      endModuleEdit();
+      message.success(`模块「${name}」已保存`);
+    } catch (e) {
+      message.error({ content: `保存模块定义失败：${apiErrorText(e, '未知错误')}`, duration: 6 });
+    }
+  };
+
+  /** 图级端口变更：同步画布 IO 节点显示、迁移/清理相关连线。
+   *  端口名即 Handle id（ModuleNode.tsx），只改 graphPorts 会产生悬空边与过期把手。 */
+  const applyGraphPorts = (
+    kind: 'inputs' | 'outputs',
+    ports: Port[],
+    touchEdges?: (edges: RFEdge[]) => RFEdge[],
+  ) => {
+    const s = useGraphStore.getState();
+    const ioId = kind === 'inputs' ? GRAPH_IN : GRAPH_OUT;
+    const nodes2: RFNode[] = s.nodes.map((n) =>
+      n.id === ioId
+        ? { ...n, data: { ...(n.data as IONodeData), ports: ports.map((p) => ({ ...p })) } }
+        : n);
+    useGraphStore.setState({
+      graphInputs: kind === 'inputs' ? ports : s.graphInputs,
+      graphOutputs: kind === 'outputs' ? ports : s.graphOutputs,
+      nodes: nodes2,
+      edges: touchEdges ? touchEdges(s.edges) : s.edges,
+    });
+    s.scheduleValidate();
+  };
+
+  const patchGraphPort = (kind: 'inputs' | 'outputs', index: number, patch: Partial<Port>) => {
+    const list = kind === 'inputs' ? store.graphInputs : store.graphOutputs;
+    const ports = [...list];
+    const oldName = ports[index].name;
+    ports[index] = { ...ports[index], ...patch };
+    const newName = ports[index].name;
+    const ioId = kind === 'inputs' ? GRAPH_IN : GRAPH_OUT;
+    applyGraphPorts(kind, ports, oldName === newName ? undefined : (eds) => eds.map((e) => {
+      if (kind === 'inputs' && e.source === ioId && e.sourceHandle === oldName) return { ...e, sourceHandle: newName };
+      if (kind === 'outputs' && e.target === ioId && e.targetHandle === oldName) return { ...e, targetHandle: newName };
+      return e;
+    }));
+  };
+
+  const removeGraphPort = (kind: 'inputs' | 'outputs', index: number) => {
+    const s = useGraphStore.getState();
+    const list = kind === 'inputs' ? s.graphInputs : s.graphOutputs;
+    const removed = list[index];
+    const ports = list.filter((_, j) => j !== index);
+    const ioId = kind === 'inputs' ? GRAPH_IN : GRAPH_OUT;
+    const doomed = s.edges.filter((e) =>
+      kind === 'inputs'
+        ? e.source === ioId && e.sourceHandle === removed.name
+        : e.target === ioId && e.targetHandle === removed.name);
+    applyGraphPorts(kind, ports, (eds) => eds.filter((e) => !doomed.includes(e)));
+    if (doomed.length > 0) message.info(`已删除端口「${removed.name}」及其 ${doomed.length} 条连线`);
+  };
 
   // ---- 自定义模块编辑条 ----
   if (editing) {
@@ -146,23 +235,16 @@ export default function PropPanel() {
           <div className="mf-props-hint">
             画布现在展示模块内部结构：可增删节点与连线，可编辑「模块输入/输出」端口（即对外接口）。
           </div>
-          <Button type="primary" block icon={<SaveOutlined />} onClick={() => void store.saveEditModule()}>
+          <Button type="primary" block icon={<SaveOutlined />} onClick={() => void saveEdit()}>
             保存模块定义
           </Button>
-          <Button block icon={<StopOutlined />} onClick={() => store.cancelEditModule()} style={{ marginTop: 8 }}>
+          <Button block icon={<StopOutlined />} onClick={() => endModuleEdit()} style={{ marginTop: 8 }}>
             取消并返回模型
           </Button>
         </div>
       </div>
     );
   }
-
-  const selectedNode = selectedNodeIds.length === 1
-    ? nodes.find((n) => n.id === selectedNodeIds[0])
-    : undefined;
-  const selectedEdge = selectedEdgeIds.length === 1
-    ? edges.find((e) => e.id === selectedEdgeIds[0])
-    : undefined;
 
   // ---- 节点属性 ----
   if (selectedNode && selectedNode.id !== GRAPH_IN && selectedNode.id !== GRAPH_OUT) {
@@ -196,7 +278,7 @@ export default function PropPanel() {
             <div className="mf-props-hint">
               自定义模块「{mod?.name ?? d.op}」的参数定义在模块内部。
               <Button size="small" block style={{ marginTop: 8 }}
-                onClick={() => mod && useGraphStore.getState().startEditModule(mod)}>
+                onClick={() => void openModuleDef(mod?.id ?? d.op.slice(7))}>
                 编辑模块定义
               </Button>
             </div>
@@ -217,7 +299,7 @@ export default function PropPanel() {
             <PortRow key={p.name} port={p} nameEditable={false}
               onPatch={(patch) => store.updateNodePort(selectedNode.id, 'outputs', p.name, patch)} />
           ))}
-          <div className="mf-props-hint">端口 shape 由形状推导自动回填；也可手动修改（冲突时校验会报错）。</div>
+          <div className="mf-props-hint">输出端口 shape 可手动修改（冲突时校验会报错）；输入端口 shape 由上游连线推导自动回填。</div>
         </div>
       </div>
     );
@@ -236,14 +318,14 @@ export default function PropPanel() {
               <PortRow
                 port={p}
                 nameEditable
-                onPatch={(patch) => store.updateGraphPort(kind, i, patch)}
-                onRemove={() => store.setGraphPorts(kind, ports.filter((_, j) => j !== i))}
+                onPatch={(patch) => patchGraphPort(kind, i, patch)}
+                onRemove={() => removeGraphPort(kind, i)}
               />
               <Divider style={{ margin: '6px 0' }} />
             </div>
           ))}
           <Button block size="small" icon={<PlusOutlined />}
-            onClick={() => store.setGraphPorts(kind, [...ports, { name: `${kind === 'inputs' ? 'in' : 'out'}${ports.length + 1}`, dtype: 'float32', shape: ['batch', 8] }])}>
+            onClick={() => applyGraphPorts(kind, [...ports, { name: `${kind === 'inputs' ? 'in' : 'out'}${ports.length + 1}`, dtype: 'float32', shape: ['batch', 8] }])}>
             添加端口
           </Button>
           <div className="mf-props-hint">端口的名称、dtype、shape 都可修改，保存为自定义模块时沿用。</div>
@@ -306,7 +388,7 @@ export default function PropPanel() {
           </div>
         </>
       )}
-      {nodes.length === 0 && <Empty description="拖动左侧算子到画布开始搭建" style={{ marginTop: 40 }} />}
+      {isEmptyCanvas && <Empty description="拖动左侧算子到画布开始搭建" style={{ marginTop: 40 }} />}
     </div>
   );
 }

@@ -12,6 +12,7 @@ import type { ModelDetail, ModelSummary, PredictResult } from '../schema/graph';
 import type { Port } from '../schema/graph';
 import { fmtShape } from '../utils/shape';
 import * as api from '../api/client';
+import { apiErrorText } from './errors';
 
 interface InputValue {
   kind: 'text' | 'image' | 'tensor';
@@ -106,22 +107,30 @@ export default function ModelsDrawer() {
   }, [modelsOpen, refresh]);
 
   const openDetail = async (modelId: string) => {
-    const d = await api.getModel(modelId);
-    setDetail(d);
-    setResult(null);
-    setValues(Object.fromEntries(
-      (d.topology?.inputs ?? []).map((p) => [p.name, { kind: 'tensor' as const, text: '', dataText: '' }]),
-    ));
+    try {
+      const d = await api.getModel(modelId);
+      setDetail(d);
+      setResult(null);
+      setValues(Object.fromEntries(
+        (d.topology?.inputs ?? []).map((p) => [p.name, { kind: 'tensor' as const, text: '', dataText: '' }]),
+      ));
+    } catch (e) {
+      message.error(`打开模型详情失败：${apiErrorText(e, '未知错误')}`);
+    }
   };
 
   const showSource = async () => {
     if (!detail) return;
-    const res = await api.modelFiles(detail.model_id);
-    openSource({
-      title: `「${detail.model_id}」训练时的源码快照`,
-      code: res.files['model.py'] ?? '',
-      files: res.files,
-    });
+    try {
+      const res = await api.modelFiles(detail.model_id);
+      openSource({
+        title: `「${detail.model_id}」训练时的源码快照`,
+        code: res.files['model.py'] ?? '',
+        files: res.files,
+      });
+    } catch (e) {
+      message.error(`获取训练源码失败：${apiErrorText(e, '未知错误')}`);
+    }
   };
 
   const doPredict = async () => {

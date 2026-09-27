@@ -11,13 +11,19 @@ import { useGraphStore } from '../stores/graphStore';
 import { useUIStore } from '../stores/uiStore';
 import type { Graph } from '../schema/graph';
 import * as api from '../api/client';
+import { apiErrorText } from './errors';
+import { namespaceGraphIds } from './graphIds';
 
 export default function Toolbar() {
-  const store = useGraphStore();
+  // 只订阅工具栏展示需要的切片；动作经 getState() 快照调用（引用稳定）
+  const validation = useGraphStore((s) => s.validation);
+  const modelMeta = useGraphStore((s) => s.modelMeta);
+  const editing = useGraphStore((s) => s.editing);
+  const selectedNodeIds = useGraphStore((s) => s.selectedNodeIds);
+  const store = useGraphStore.getState();
   const ui = useUIStore();
   const fileRef = useRef<HTMLInputElement>(null);
-  const { validation, modelMeta, editing, selectedNodeIds } = store;
-
+  
   const onExport = (fmt: 'json' | 'yaml') => {
     const graph = store.exportGraph();
     const text = fmt === 'json'
@@ -36,10 +42,12 @@ export default function Toolbar() {
     try {
       const g = (text.trim().startsWith('{') ? JSON.parse(text) : yamlLoad(text)) as Graph;
       if (!g.nodes || !g.inputs) throw new Error('不是合法的拓扑文件');
-      store.importGraph(g);
+      // 文件里的节点/边 id 改名到独立命名空间，避免与会话内 nextId 撞出重复 id
+      store.importGraph(namespaceGraphIds(g));
+      useGraphStore.setState({ selectedNodeIds: [], selectedEdgeIds: [] });
       message.success(`已导入「${g.model?.name ?? file.name}」`);
     } catch (e) {
-      message.error(`导入失败：${e instanceof Error ? e.message : '格式错误'}`);
+      message.error(`导入失败：${apiErrorText(e, '格式错误')}`);
     }
   };
 
@@ -53,12 +61,7 @@ export default function Toolbar() {
         downloadFolder: res.folder,
       });
     } catch (e) {
-      const detail = e instanceof api.ApiError ? e.detail : null;
-      const msg = detail && typeof detail === 'object' && 'errors' in (detail as object)
-        ? (detail as { errors: { where?: string; message: string }[] }).errors
-            .map((x) => `${x.where ? `${x.where}: ` : ''}${x.message}`).join('\n')
-        : e instanceof Error ? e.message : '生成失败';
-      message.error({ content: `生成失败：\n${msg}`, duration: 6 });
+      message.error({ content: `生成失败：${apiErrorText(e, '未知错误')}`, duration: 6 });
     }
   };
 
@@ -135,7 +138,13 @@ export default function Toolbar() {
         <Button size="small" icon={<FolderOpenOutlined />} onClick={() => ui.setModelsOpen(true)}>
           已训练模型
         </Button>
-        <Popconfirm title="清空画布？此操作不可撤销" onConfirm={() => store.clearCanvas()}>
+        <Popconfirm
+          title="清空画布？此操作不可撤销"
+          onConfirm={() => {
+            store.clearCanvas();
+            useGraphStore.setState({ selectedNodeIds: [], selectedEdgeIds: [] });
+          }}
+        >
           <Button size="small" danger icon={<CloudUploadOutlined />}>清空</Button>
         </Popconfirm>
       </Space>

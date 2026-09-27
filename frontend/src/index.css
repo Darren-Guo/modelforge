@@ -103,7 +103,7 @@ html, body, #root {
   border: 2px solid #1677ff;
   border-radius: 8px;
   font-size: 12px;
-  overflow: hidden;
+  overflow: visible; /* 把手半圆需伸出边界，不能裁剪 */
   box-shadow: 0 2px 6px rgba(0, 0, 0, .08);
 }
 .mf-node.selected {
@@ -119,6 +119,7 @@ html, body, #root {
   display: flex;
   align-items: center;
   gap: 6px;
+  border-radius: 5px 5px 0 0;
 }
 .mf-node-group {
   font-size: 10px;

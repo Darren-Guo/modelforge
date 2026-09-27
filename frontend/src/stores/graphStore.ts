@@ -1,6 +1,10 @@
 /** 全局图状态：React Flow 节点/边 + 图级输入输出 + 校验调度 + 序列化。 */
+import { message } from 'antd';
 import { create } from 'zustand';
-import type { Connection, Edge, Node } from '@xyflow/react';
+import {
+  applyEdgeChanges, applyNodeChanges,
+  type Connection, type Edge, type EdgeChange, type Node, type NodeChange,
+} from '@xyflow/react';
 import * as api from '../api/client';
 import type {
   Dim, Dtype, Graph, GraphEdge, GraphNode, ModuleDef, ModuleSummary,
@@ -38,7 +42,11 @@ export interface ModuleEditMode {
   description: string;
   inputs: Port[];
   outputs: Port[];
-  snapshot: { nodes: RFNode[]; edges: RFEdge[] } | null; // 模型画布的备份
+  // 模型画布的备份（含图级端口，退出编辑时一并恢复）
+  snapshot: {
+    nodes: RFNode[]; edges: RFEdge[];
+    graphInputs: Port[]; graphOutputs: Port[];
+  } | null;
 }
 
 interface BoundaryGroup {
@@ -63,7 +71,6 @@ interface GraphState {
   opIndex: Record<string, OpDef>;
   modules: ModuleSummary[];
   moduleIndex: Record<string, ModuleDef>;
-  datasets: api.ApiError | null;
 
   // 画布
   nodes: RFNode[];
@@ -116,7 +123,88 @@ interface GraphState {
 let idCounter = 1;
 const nextId = (prefix: string) => `${prefix}${idCounter++}`;
 
+/** 整体载入图后把 idCounter 推进到已用 id 之后，避免新增节点/边撞 id。 */
+function advanceIdCounter(ids: string[]) {
+  let max = idCounter - 1;
+  for (const id of ids) {
+    const m = /(\d+)$/.exec(id);
+    if (m) max = Math.max(max, parseInt(m[1], 10));
+  }
+  idCounter = max + 1;
+}
+
+/** 用户手动改过 shape/dtype 的端口（nodeId:kind:portName），校验回填跳过以免静默还原手动声明。 */
+const manualPorts = new Set<string>();
+const manualKey = (id: string, kind: string, port: string) => `${id}:${kind}:${port}`;
+
 let validateTimer: ReturnType<typeof setTimeout> | null = null;
+let validateSeq = 0;
+
+// ---- 拖拽流畅度：变更按动画帧合并 -----------------------------------------
+// React Flow 拖拽时每个 mousemove 都发一批 position 变更；若每批都 set()，
+// 全应用（工具栏/面板/弹窗）会以 100Hz+ 重渲染，拖拽就一卡一卡。
+// 这里把变更缓冲到 requestAnimationFrame 每帧只应用一次。
+// 同时拖拽期间冻结校验回填（validateNow 的整表节点重建会打断拖拽）。
+let nodeBuf: NodeChange<RFNode>[] = [];
+let edgeBuf: EdgeChange[] = [];
+let rafId: number | null = null;
+let draggingNow = false;
+let validateWhileDragging = false;
+
+function flushGraphChanges() {
+  rafId = null;
+  const store = useGraphStore;
+  const nChanges = nodeBuf;
+  const eChanges = edgeBuf;
+  nodeBuf = [];
+  edgeBuf = [];
+  if (nChanges.length === 0 && eChanges.length === 0) return;
+
+  const wasDragging = draggingNow;
+  draggingNow = nChanges.some(
+    (c) => c.type === 'position' && (c as { dragging?: boolean }).dragging === true,
+  );
+  const dragEnded = wasDragging && !draggingNow;
+
+  if (nChanges.length > 0) {
+    // 丢弃 replace 回声：RF 在对象身份不一致时发 {type:'replace'}，而 applyNodeChanges
+    // 会把 item 复制成新对象——身份又不一致 → RF 再发 replace → 无限回声循环
+    // （每轮都是一次全店更新，表现为拖拽"一顿一顿"）。replace 携带的就是我们自己的
+    // 对象，直接忽略即可。
+    const filtered = nChanges.filter(
+      (c) => c.type !== 'replace' && !(c.type === 'remove' && (c.id === GRAPH_IN || c.id === GRAPH_OUT)),
+    );
+    if (filtered.length > 0) {
+      const st = store.getState();
+      const nodes = applyNodeChanges(filtered, st.nodes);
+      const removedIds = new Set(filtered.filter((c) => c.type === 'remove').map((c) => c.id));
+      const edges = removedIds.size > 0
+        ? st.edges.filter((e) => !removedIds.has(e.source) && !removedIds.has(e.target))
+        : st.edges;
+      store.setState({ nodes, edges });
+      if (removedIds.size > 0) st.scheduleValidate();
+    }
+  }
+  const eFiltered = eChanges.filter((c) => c.type !== 'replace');
+  if (eFiltered.length > 0) {
+    const st = store.getState();
+    const edges = applyEdgeChanges(eFiltered, st.edges);
+    store.setState({ edges });
+    if (eFiltered.some((c) => c.type === 'remove')) st.scheduleValidate();
+  }
+  if (dragEnded && validateWhileDragging) {
+    validateWhileDragging = false;
+    store.getState().scheduleValidate();
+  }
+}
+
+function scheduleGraphFlush() {
+  if (rafId === null && typeof requestAnimationFrame === 'function') {
+    rafId = requestAnimationFrame(flushGraphChanges);
+  } else if (rafId === null) {
+    flushGraphChanges(); // 无 rAF 环境退化为同步
+  }
+}
 
 const defaultPorts = (defs: { name: string; dtype: string }[]): Port[] =>
   defs.map((d) => ({ name: d.name, dtype: d.dtype as Dtype, shape: [] }));
@@ -140,7 +228,6 @@ export const useGraphStore = create<GraphState>((set, get) => ({
   opIndex: {},
   modules: [],
   moduleIndex: {},
-  datasets: null,
 
   nodes: makeIONodes(
     [{ name: 'x', dtype: 'float32', shape: ['batch', 'seq', 768] }],
@@ -168,14 +255,11 @@ export const useGraphStore = create<GraphState>((set, get) => ({
 
   async refreshModules() {
     const list = await api.listModules();
+    // 列表接口只有摘要（无 nodes/edges），moduleIndex 必须存全量定义，
+    // 否则「编辑模块定义」遍历 mod.graph.nodes 会崩（见 GET /api/modules 契约）
+    const defs = await Promise.all(list.map((m) => api.getModule(m.id)));
     const moduleIndex: Record<string, ModuleDef> = {};
-    for (const m of list) {
-      moduleIndex[m.id] = {
-        id: m.id, name: m.name, description: m.description,
-        inputs: m.inputs, outputs: m.outputs,
-        graph: m as unknown as Graph, created_at: m.created_at, updated_at: m.updated_at,
-      } as ModuleDef;
-    }
+    for (const d of defs) moduleIndex[d.id] = d;
     set({ modules: list, moduleIndex });
   },
 
@@ -226,62 +310,14 @@ export const useGraphStore = create<GraphState>((set, get) => ({
 
   onNodesChange(changes) {
     if (changes.length === 0) return;
-    const nodes = [...get().nodes];
-    const edges = [...get().edges];
-    let dirty = false;
-    for (const raw of changes) {
-      const c = raw as { type: string; id: string; position?: { x: number; y: number }; selected?: boolean; dragging?: boolean };
-      if (c.type === 'remove') {
-        const idx = nodes.findIndex((n) => n.id === c.id);
-        if (idx >= 0 && nodes[idx].id !== GRAPH_IN && nodes[idx].id !== GRAPH_OUT) {
-          nodes.splice(idx, 1);
-          for (let i = edges.length - 1; i >= 0; i--) {
-            if (edges[i].source === c.id || edges[i].target === c.id) edges.splice(i, 1);
-          }
-          dirty = true;
-        }
-      } else if (c.type === 'position' && c.position) {
-        const n = nodes.find((x) => x.id === c.id);
-        if (n && (n.position.x !== c.position.x || n.position.y !== c.position.y)) {
-          n.position = c.position;
-          dirty = true;
-        }
-      } else if (c.type === 'select') {
-        const n = nodes.find((x) => x.id === c.id);
-        if (n && n.selected !== c.selected) {
-          n.selected = c.selected;
-          dirty = true;
-        }
-      }
-    }
-    if (dirty) set({ nodes, edges });
+    nodeBuf.push(...(changes as NodeChange<RFNode>[]));
+    scheduleGraphFlush();
   },
 
   onEdgesChange(changes) {
     if (changes.length === 0) return;
-    const edges = [...get().edges];
-    const nodes = get().nodes;
-    let dirty = false;
-    for (const raw of changes) {
-      const c = raw as { type: string; id: string; selected?: boolean };
-      if (c.type === 'remove') {
-        const idx = edges.findIndex((e) => e.id === c.id);
-        if (idx >= 0) {
-          edges.splice(idx, 1);
-          dirty = true;
-        }
-      } else if (c.type === 'select') {
-        const e = edges.find((x) => x.id === c.id);
-        if (e && e.selected !== c.selected) {
-          e.selected = c.selected;
-          dirty = true;
-        }
-      }
-    }
-    if (dirty) {
-      set({ edges, nodes });
-      if (changes.some((raw) => (raw as { type: string }).type === 'remove')) get().scheduleValidate();
-    }
+    edgeBuf.push(...(changes as EdgeChange[]));
+    scheduleGraphFlush();
   },
 
   onConnect(conn) {
@@ -334,6 +370,8 @@ export const useGraphStore = create<GraphState>((set, get) => ({
   },
 
   updateNodePort(id, kind, portName, patch) {
+    // 手动改过 shape/dtype 的端口不再被校验回填覆盖
+    if (patch.shape !== undefined || patch.dtype !== undefined) manualPorts.add(manualKey(id, kind, portName));
     set({
       nodes: get().nodes.map((n) => {
         if (n.id !== id) return n;
@@ -375,9 +413,11 @@ export const useGraphStore = create<GraphState>((set, get) => ({
   clearCanvas() {
     const inputs: Port[] = [{ name: 'x', dtype: 'float32', shape: ['batch', 'seq', 768] }];
     const outputs: Port[] = [{ name: 'y', dtype: 'float32', shape: ['batch', 'seq', 10] }];
+    manualPorts.clear();
     set({
       nodes: makeIONodes(inputs, outputs), edges: [],
       graphInputs: inputs, graphOutputs: outputs,
+      selectedNodeIds: [], selectedEdgeIds: [],
       validation: null,
     });
     get().scheduleValidate();
@@ -428,11 +468,15 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       id: e.id, source: e.from.node, target: e.to.node,
       sourceHandle: e.from.port, targetHandle: e.to.port,
     }));
+    // 沿用文件里的 id，必须把计数器推到已用 id 之后，否则新增节点会撞 id
+    advanceIdCounter([...g.nodes.map((n) => n.id), ...g.edges.map((e) => e.id)]);
+    manualPorts.clear();
     set({
       nodes, edges,
       graphInputs: g.inputs.map((p) => ({ ...p })),
       graphOutputs: g.outputs.map((p) => ({ ...p })),
       modelMeta: { ...g.model },
+      selectedNodeIds: [], selectedEdgeIds: [],
       validation: null,
     });
     get().scheduleValidate();
@@ -566,18 +610,27 @@ export const useGraphStore = create<GraphState>((set, get) => ({
   },
 
   async validateNow() {
+    const seq = ++validateSeq;
     set({ validating: true });
     try {
       const report = await api.validateGraph(get().exportGraph());
-      // 形状推导回填（以校验结果为准）
+      if (seq !== validateSeq) return null; // 过期响应丢弃，避免覆盖新状态
+      if (draggingNow) {
+        // 拖拽进行中：整表节点重建会打断拖拽，只记报告，形状回填延到拖拽结束
+        validateWhileDragging = true;
+        set({ validation: report, validating: false });
+        return report;
+      }
+      // 形状推导回填（以校验结果为准；用户手动改过的端口不回填，冲突由校验报错暴露）
       const byId = new Map(report.nodes.map((n) => [n.id, n]));
       const errorNames = new Set(report.errors.map((e) => e.where));
       const nodes = get().nodes.map((n) => {
         if (n.id === GRAPH_IN || n.id === GRAPH_OUT) return n;
         const d = n.data as ModuleNodeData;
         const inf = byId.get(n.id);
-        const merge = (ports: Port[], inferred: { name: string; shape: Dim[]; dtype: Dtype }[]) =>
+        const merge = (kind: 'inputs' | 'outputs', ports: Port[], inferred: { name: string; shape: Dim[]; dtype: Dtype }[]) =>
           ports.map((p) => {
+            if (manualPorts.has(manualKey(n.id, kind, p.name))) return p;
             const ip = inferred.find((x) => x.name === p.name);
             return ip ? { ...p, shape: ip.shape, dtype: ip.dtype } : p;
         });
@@ -586,14 +639,15 @@ export const useGraphStore = create<GraphState>((set, get) => ({
           data: {
             ...d,
             error: errorNames.has(d.name) || errorNames.has(n.id),
-            inputs: inf ? merge(d.inputs, inf.inputs) : d.inputs,
-            outputs: inf ? merge(d.outputs, inf.outputs) : d.outputs,
+            inputs: inf ? merge('inputs', d.inputs, inf.inputs) : d.inputs,
+            outputs: inf ? merge('outputs', d.outputs, inf.outputs) : d.outputs,
           } as ModuleNodeData,
         };
       });
       set({ validation: report, validating: false, nodes });
       return report;
     } catch (e) {
+      if (seq !== validateSeq) return null; // 过期失败同样不覆盖新状态
       set({
         validating: false,
         validation: {
@@ -607,7 +661,10 @@ export const useGraphStore = create<GraphState>((set, get) => ({
   },
 
   startEditModule(mod) {
-    const snapshot = { nodes: get().nodes, edges: get().edges };
+    const snapshot = {
+      nodes: get().nodes, edges: get().edges,
+      graphInputs: get().graphInputs, graphOutputs: get().graphOutputs,
+    };
     const nodes: RFNode[] = makeIONodes(mod.inputs, mod.outputs).map((n) => ({
       ...n,
       data: { ...(n.data as IONodeData), label: (n.data as IONodeData).kind === 'in' ? '模块输入' : '模块输出' },
@@ -628,10 +685,13 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       id: e.id, source: e.from.node, target: e.to.node,
       sourceHandle: e.from.port, targetHandle: e.to.port,
     }));
+    // 模块内部节点沿用其 id，同样要把计数器推到已用 id 之后
+    advanceIdCounter([...mod.graph.nodes.map((n) => n.id), ...mod.graph.edges.map((e) => e.id)]);
     set({
       nodes, edges,
       graphInputs: mod.inputs.map((p) => ({ ...p })),
       graphOutputs: mod.outputs.map((p) => ({ ...p })),
+      selectedNodeIds: [], selectedEdgeIds: [],
       editing: {
         moduleId: mod.id, name: mod.name, description: mod.description,
         inputs: mod.inputs.map((p) => ({ ...p })),
@@ -648,10 +708,21 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     const graph = get().exportGraph();
     graph.inputs = get().graphInputs;
     graph.outputs = get().graphOutputs;
-    await api.saveModule({
-      id: ed.moduleId, name: ed.name, description: ed.description,
-      inputs: get().graphInputs, outputs: get().graphOutputs, graph,
-    });
+    try {
+      await api.saveModule({
+        id: ed.moduleId, name: ed.name, description: ed.description,
+        inputs: get().graphInputs, outputs: get().graphOutputs, graph,
+      });
+    } catch (e) {
+      // 失败时停留在编辑态并给出原因，避免被误认为保存成功
+      const detail = e instanceof api.ApiError ? e.detail : null;
+      const msg = detail && typeof detail === 'object' && 'report' in (detail as object)
+        ? (detail as { report: { errors: { message: string }[] } }).report.errors
+            .map((x) => x.message).join('；')
+        : e instanceof Error ? e.message : '保存失败';
+      message.error({ content: `保存模块定义失败：${msg}`, duration: 6 });
+      return;
+    }
     await get().refreshModules();
     get().cancelEditModule();
   },
@@ -660,7 +731,10 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     const ed = get().editing;
     if (!ed?.snapshot) return;
     set({
-      nodes: ed.snapshot.nodes, edges: ed.snapshot.edges, editing: null,
+      nodes: ed.snapshot.nodes, edges: ed.snapshot.edges,
+      graphInputs: ed.snapshot.graphInputs, graphOutputs: ed.snapshot.graphOutputs,
+      selectedNodeIds: [], selectedEdgeIds: [],
+      editing: null,
     });
     get().scheduleValidate();
   },

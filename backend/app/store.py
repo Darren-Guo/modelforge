@@ -87,19 +87,19 @@ def get_module(module_id: str) -> dict[str, Any] | None:
 def save_module(module_id: str | None, name: str, description: str, data: dict[str, Any]) -> dict[str, Any]:
     now = _now()
     with get_conn() as conn:
-        if module_id:
-            exists = conn.execute("SELECT id FROM modules WHERE id=?", (module_id,)).fetchone()
-            if exists:
-                conn.execute(
-                    "UPDATE modules SET name=?, description=?, data=?, updated_at=? WHERE id=?",
-                    (name, description, json.dumps(data, ensure_ascii=False), now, module_id),
-                )
-                return get_module(module_id)  # type: ignore[return-value]
-        mid = module_id or new_id("mod")
-        conn.execute(
-            "INSERT INTO modules (id, name, description, data, created_at, updated_at) VALUES (?,?,?,?,?,?)",
-            (mid, name, description, json.dumps(data, ensure_ascii=False), now, now),
-        )
+        if module_id and conn.execute("SELECT id FROM modules WHERE id=?", (module_id,)).fetchone():
+            conn.execute(
+                "UPDATE modules SET name=?, description=?, data=?, updated_at=? WHERE id=?",
+                (name, description, json.dumps(data, ensure_ascii=False), now, module_id),
+            )
+            mid = module_id
+        else:
+            mid = module_id or new_id("mod")
+            conn.execute(
+                "INSERT INTO modules (id, name, description, data, created_at, updated_at) VALUES (?,?,?,?,?,?)",
+                (mid, name, description, json.dumps(data, ensure_ascii=False), now, now),
+            )
+    # with 退出后统一回读：连接内提前读会拿到未提交的旧值
     return get_module(mid)  # type: ignore[return-value]
 
 
@@ -185,7 +185,35 @@ def finish_training(job_id: str, status: str) -> None:
                      (status, _now(), job_id))
 
 
+def get_training(job_id: str) -> dict[str, Any] | None:
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM trainings WHERE job_id=?", (job_id,)).fetchone()
+    return _training_row(row) if row else None
+
+
 def list_trainings() -> list[dict[str, Any]]:
     with get_conn() as conn:
         rows = conn.execute("SELECT * FROM trainings ORDER BY created_at DESC").fetchall()
-    return [dict(r) for r in rows]
+    return [_training_row(r) for r in rows]
+
+
+def mark_stale_trainings(status: str = "failed") -> int:
+    """服务启动时调用：上个进程遗留的 running 行其子进程已不存在，落为终态。"""
+    with get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE trainings SET status=?, finished_at=? WHERE status='running'",
+            (status, _now()),
+        )
+        return cur.rowcount
+
+
+def _training_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "job_id": row["job_id"],
+        "model_id": row["model_id"],
+        "status": row["status"],
+        "dataset": row["dataset"],
+        "hyperparams": json.loads(row["hyperparams"] or "{}"),
+        "created_at": row["created_at"],
+        "finished_at": row["finished_at"],
+    }

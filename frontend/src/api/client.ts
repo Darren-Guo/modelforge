@@ -17,7 +17,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       const body = await res.json();
       detail = body.detail ?? body;
     } catch { /* ignore */ }
-    throw new ApiError(typeof detail === 'string' ? detail : JSON.stringify(detail, null, 2), detail);
+    // FastAPI 422 的 detail 是 [{loc, msg}] 数组，拼成可读列表而不是整段 JSON
+    const msg = Array.isArray(detail)
+      ? detail.map((d) => {
+          const item = d as { loc?: unknown[]; msg?: string } | null;
+          return item?.msg ? `${(item.loc ?? []).join('.')}: ${item.msg}` : JSON.stringify(d);
+        }).join('\n')
+      : typeof detail === 'string' ? detail : JSON.stringify(detail, null, 2);
+    throw new ApiError(msg, detail);
   }
   return res.json() as Promise<T>;
 }

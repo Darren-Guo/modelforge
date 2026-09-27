@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any, Literal, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_serializer
 
 # 维度：整数（静态维）或符号名（如 "batch"、"seq"）
 Dim = Union[int, str]
@@ -16,10 +16,14 @@ Dtype = Literal["float32", "float16", "int64", "int32", "bool"]
 
 
 class Port(BaseModel):
-    """模块端口：名称 + 数据类型 + 形状，全部可由用户修改。"""
+    """模块端口：名称 + 数据类型 + 形状，全部可由用户修改。
+
+    dtype 缺省为 None（未声明）：节点端口回落到算子/模块规格的 dtype，
+    图级端口回落 float32。显式声明永远优先。
+    """
 
     name: str
-    dtype: Dtype = "float32"
+    dtype: Dtype | None = None
     shape: list[Dim] = []
 
 
@@ -42,13 +46,27 @@ class PortRef(BaseModel):
 
 
 class Edge(BaseModel):
-    """有向边：from 节点端口 → to 节点端口。"""
+    """有向边：from 节点端口 → to 节点端口。
+
+    wire 契约：JSON 字段名固定为 from/to（前端 GraphEdge 只认这两个名字）。
+    Python 侧属性名保持 source/target；序列化（model_dump / model_dump_json，
+    无论 by_alias）统一输出 from/to，防止新增调用点忘了 by_alias=True 而破坏契约。
+    """
 
     id: str
     source: PortRef = Field(alias="from")
     target: PortRef = Field(alias="to")
 
     model_config = {"populate_by_name": True}
+
+    @model_serializer(mode="wrap")
+    def _ser_wire(self, handler):
+        d = handler(self)
+        if "source" in d:
+            d["from"] = d.pop("source")
+        if "target" in d:
+            d["to"] = d.pop("target")
+        return d
 
 
 class ModelMeta(BaseModel):

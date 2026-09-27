@@ -197,6 +197,49 @@ def main() -> None:
     mod_id = mod["id"]
     print(f"[PASS] C1. 自定义模块 FFN 保存成功：{mod_id}")
 
+    # C1b. POST /modules 响应契约与 GET 一致（inputs/outputs/graph 平铺在顶层，无 data 包裹）
+    assert "graph" in mod and "inputs" in mod and "outputs" in mod and "data" not in mod, list(mod)
+    got = req("GET", f"/modules/{mod_id}")
+    assert set(got) == set(mod), (sorted(got), sorted(mod))
+    print("[PASS] C1b. POST /modules 响应与 GET /modules/{id} 契约一致（平铺结构）")
+
+    # C1c. 嵌套自定义模块：内部引用库中已有模块应可保存（曾因空 modules 校验而 400）
+    nested_inner = {
+        "format": "modelforge/graph", "version": "0.1",
+        "model": {"name": "", "description": ""},
+        "inputs": [p("x", "float32", ["batch", 64])],
+        "outputs": [p("y", "float32", ["batch", 64])],
+        "nodes": [node("w0", "inner_ffn", f"custom:{mod_id}", "custom", {}, ["x"], ["y"])],
+        "edges": [
+            edge("w0e", "__graph_in__", "x", "w0", "x"),
+            edge("w1e", "w0", "y", "__graph_out__", "y"),
+        ],
+    }
+    nested = req("POST", "/modules", {
+        "name": "FFNWrapper", "description": "嵌套引用 FFN",
+        "inputs": [p("x", "float32", ["batch", 64])],
+        "outputs": [p("y", "float32", ["batch", 64])],
+        "graph": nested_inner,
+    })
+    assert nested["id"] and nested["graph"]["nodes"], nested
+    print(f"[PASS] C1c. 嵌套自定义模块保存成功：{nested['id']}")
+
+    # C1d. 自引用（递归定义）应被拒绝
+    self_id = f"mod_e2e_self_{SUFFIX}"
+    self_ref_inner = json.loads(json.dumps(nested_inner))
+    self_ref_inner["nodes"][0]["op"] = f"custom:{self_id}"
+    try:
+        req("POST", "/modules", {
+            "id": self_id, "name": "Recursive", "description": "",
+            "inputs": [p("x", "float32", ["batch", 64])],
+            "outputs": [p("y", "float32", ["batch", 64])],
+            "graph": self_ref_inner,
+        })
+        raise AssertionError("自引用模块应保存失败")
+    except RuntimeError as e:
+        assert "递归" in str(e), e
+    print("[PASS] C1d. 自引用（递归定义）模块保存被拒绝")
+
     use_graph = {
         "format": "modelforge/graph", "version": "0.1",
         "model": {"name": "FFN下游模型", "description": ""},

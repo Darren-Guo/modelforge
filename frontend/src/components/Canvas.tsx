@@ -6,7 +6,7 @@
 import { useCallback, useMemo, useRef } from 'react';
 import {
   Background, Controls, MiniMap, ReactFlow, useReactFlow,
-  type Connection, type Edge, type Node, type IsValidConnection,
+  type Connection, type Edge, type IsValidConnection, type Node, type OnConnectEnd,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { message } from 'antd';
@@ -15,7 +15,24 @@ import { useUIStore } from '../stores/uiStore';
 import { nodeTypes } from '../nodes/ModuleNode';
 import { checkConnection, portOfGraph } from '../utils/shape';
 import * as api from '../api/client';
+import { apiErrorText } from './errors';
 import { GRAPH_IN, GRAPH_OUT } from '../schema/graph';
+
+/** 连接被拒绝的原因：与 store.onConnect 的判定一致，另补自环/占用等文案（checkConnection 只看 dtype/shape）。 */
+function connectionIssue(conn: Connection | Edge): string | null {
+  const store = useGraphStore.getState();
+  if (!conn.source || !conn.target || !conn.sourceHandle || !conn.targetHandle) return '端口不存在';
+  if (conn.target === GRAPH_IN || conn.source === GRAPH_OUT) return '模型输入只能作为起点、模型输出只能作为终点';
+  if (conn.source === conn.target) return '不能连接节点自身';
+  if (store.edges.some((e) => e.target === conn.target && e.targetHandle === conn.targetHandle)) {
+    return '输入端口已被占用';
+  }
+  const graph = store.exportGraph();
+  const src = portOfGraph(graph, conn.source, conn.sourceHandle);
+  const tgt = portOfGraph(graph, conn.target, conn.targetHandle);
+  if (!src || !tgt) return '端口不存在';
+  return checkConnection(src.port, tgt.port);
+}
 
 export default function Canvas() {
   const nodes = useGraphStore((s) => s.nodes);
@@ -52,30 +69,36 @@ export default function Canvas() {
     }
   }, [screenToFlowPosition]);
 
-  const isValidConnection: IsValidConnection = useCallback((conn) => {
-    const store = useGraphStore.getState();
-    const graph = store.exportGraph();
-    if (!conn.source || !conn.target || !conn.sourceHandle || !conn.targetHandle) return false;
-    if (conn.target === GRAPH_IN || conn.source === GRAPH_OUT) return false;
-    if (conn.source === conn.target) return false;
-    const already = store.edges.some(
-      (e) => e.target === conn.target && e.targetHandle === conn.targetHandle);
-    if (already) return false;
-    const src = portOfGraph(graph, conn.source, conn.sourceHandle);
-    const tgt = portOfGraph(graph, conn.target, conn.targetHandle);
-    return src && tgt ? checkConnection(src.port, tgt.port) === null : false;
-  }, []);
+  // 连接是否已被 onConnect 处理过（成功或已提示原因），避免 onConnectEnd 重复/误报
+  const connectHandled = useRef(false);
+
+  const isValidConnection: IsValidConnection = useCallback((conn) => connectionIssue(conn) === null, []);
 
   const onConnect = useCallback((conn: Connection) => {
-    const store = useGraphStore.getState();
-    const ok = store.onConnect(conn);
+    connectHandled.current = true;
+    const ok = useGraphStore.getState().onConnect(conn);
     if (!ok) {
-      const graph = store.exportGraph();
-      const src = conn.source && conn.sourceHandle ? portOfGraph(graph, conn.source, conn.sourceHandle) : undefined;
-      const tgt = conn.target && conn.targetHandle ? portOfGraph(graph, conn.target, conn.targetHandle) : undefined;
-      const reason = src && tgt ? checkConnection(src.port, tgt.port) : '端口不存在';
-      message.error(`无法连接：${reason ?? '输入端口已被占用'}`);
+      message.error(`无法连接：${connectionIssue(conn) ?? '未知原因'}`);
     }
+  }, []);
+
+  const onConnectStart = useCallback(() => {
+    connectHandled.current = false;
+  }, []);
+
+  // isValidConnection 会静默拦掉非法连接（onConnect 不触发），在拖拽松手时补一条拒绝原因
+  const onConnectEnd = useCallback<OnConnectEnd>((_event, state) => {
+    if (connectHandled.current) return;
+    const toNode = state.toNode;
+    const toHandle = state.toHandle;
+    if (!toNode || !toHandle?.id) return; // 松手在空白处：视为放弃，不打扰
+    const issue = connectionIssue({
+      source: state.fromNode?.id ?? null,
+      sourceHandle: state.fromHandle?.id ?? null,
+      target: toNode.id,
+      targetHandle: toHandle.id,
+    });
+    if (issue) message.error(`无法连接：${issue}`);
   }, []);
 
   const onSelectionChange = useCallback(({ nodes: selNodes, edges: selEdges }: { nodes: Node[]; edges: Edge[] }) => {
@@ -84,7 +107,11 @@ export default function Canvas() {
   }, []);
 
   const onNodesChange = useCallback((ch: unknown[]) => {
-    useGraphStore.getState().onNodesChange(ch);
+    const store = useGraphStore.getState();
+    store.onNodesChange(ch);
+    // 孤立节点被删除时 React Flow 只发 nodeChanges（不带 edgeChanges），
+    // 这里补一次校验调度，避免徽标/错误列表停留在旧状态
+    if ((ch as { type: string }[]).some((c) => c.type === 'remove')) store.scheduleValidate();
   }, []);
 
   const onEdgesChange = useCallback((ch: unknown[]) => {
@@ -113,12 +140,7 @@ export default function Canvas() {
         downloadFolder: res.folder,
       });
     } catch (e) {
-      const detail = e instanceof api.ApiError ? e.detail : null;
-      const msg = detail && typeof detail === 'object' && 'errors' in (detail as object)
-        ? (detail as { errors: { where?: string; message: string }[] }).errors
-            .map((x) => `${x.where ? `${x.where}: ` : ''}${x.message}`).join('；')
-        : e instanceof Error ? e.message : '生成失败';
-      message.error(`生成失败：${msg}`);
+      message.error(`生成失败：${apiErrorText(e, '未知错误')}`);
     }
   }, []);
 
@@ -139,6 +161,8 @@ export default function Canvas() {
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onConnect={onConnect}
+        onConnectStart={onConnectStart}
+        onConnectEnd={onConnectEnd}
         isValidConnection={isValidConnection}
         onSelectionChange={onSelectionChange}
         onDrop={onDrop}

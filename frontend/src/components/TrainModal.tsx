@@ -1,14 +1,17 @@
 /** 场景3：训练面板（选数据集/超参 → 启动训练 → SSE 实时日志）。 */
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, Button, Form, Input, InputNumber, Modal, Select, Space, Spin, Tag, message } from 'antd';
 import { PauseCircleOutlined, PlayCircleOutlined } from '@ant-design/icons';
 import { useGraphStore } from '../stores/graphStore';
 import { useUIStore } from '../stores/uiStore';
 import type { DatasetInfo, TrainingJob } from '../schema/graph';
 import * as api from '../api/client';
+import { apiErrorText } from './errors';
 
 export default function TrainModal() {
-  const store = useGraphStore();
+  // 性能：全店订阅会让弹窗随拖拽高频重渲染——动作走 getState() 快照
+  const store = useGraphStore.getState();
+  const modelMetaName = useGraphStore((s) => s.modelMeta.name);
   const { trainOpen, setTrainOpen, setModelsOpen } = useUIStore();
   const [datasets, setDatasets] = useState<DatasetInfo[]>([]);
   const [dataset, setDataset] = useState('random');
@@ -21,15 +24,77 @@ export default function TrainModal() {
   const [starting, setStarting] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const esRef = useRef<EventSource | null>(null);
+  const streamDone = useRef(false); // 收到终止事件/主动关闭后，不再把流关闭当成断连
   const logEnd = useRef<HTMLDivElement>(null);
+
+  /** 订阅任务日志流（SSE 从 idx=0 重放历史，天然支持中途重新接入）。 */
+  const attach = useCallback((j: TrainingJob) => {
+    esRef.current?.close();
+    streamDone.current = false;
+    setJob(j);
+    setLogs([]);
+    const es = new EventSource(`/api/trainings/${j.job_id}/logs`);
+    esRef.current = es;
+    es.onmessage = (ev) => {
+      try {
+        const evt = JSON.parse(ev.data);
+        if (evt.type === 'metric') {
+          const acc = evt.val_acc !== undefined ? ` acc=${evt.val_acc}` : '';
+          setLogs((l) => [...l, `epoch ${evt.epoch}  train_loss=${evt.train_loss}  val_loss=${evt.val_loss}${acc}  (${evt.seconds}s)`]);
+        } else if (evt.type === 'status') {
+          setLogs((l) => [...l, `[status] ${evt.message ?? JSON.stringify(evt)}`]);
+          if (evt.status === 'done' || evt.status === 'failed' || evt.status === 'stopped') {
+            // 终止事件：同步任务状态（失败/停止时后端不会再发 done），关闭流
+            streamDone.current = true;
+            es.close();
+            setJob((cur) => (cur ? { ...cur, status: evt.status } : cur));
+          }
+        } else if (evt.type === 'error') {
+          setLogs((l) => [...l, `[error] ${evt.message}`]);
+          if (evt.message === '任务不存在') {
+            streamDone.current = true;
+            es.close();
+          }
+        } else if (evt.type === 'done') {
+          setLogs((l) => [...l, `[done] ${evt.message}`]);
+          streamDone.current = true;
+          es.close();
+          setJob((cur) => (cur ? { ...cur, status: 'done' } : cur));
+        }
+      } catch { /* 非 JSON 行忽略 */ }
+    };
+    es.onerror = () => {
+      if (streamDone.current) {
+        es.close();
+        return;
+      }
+      if (es.readyState === EventSource.CLOSED) {
+        setLogs((l) => [...l, '[连接断开]']);
+        streamDone.current = true;
+        es.close();
+      }
+      // CONNECTING：浏览器在自动重连（重连后从头重放），不打扰用户
+    };
+  }, []);
 
   useEffect(() => {
     if (trainOpen) {
       void api.fetchDatasets().then(setDatasets).catch(() => setDatasets([]));
-      setModelId(`${store.modelMeta.name || 'model'}-${new Date().toISOString().slice(5, 16).replace(/[-T:]/g, '')}`);
+      setModelId(`${modelMetaName || 'model'}-${new Date().toISOString().slice(5, 16).replace(/[-T:]/g, '')}`);
+      // 关闭弹窗只是解绑流；重开时把仍在跑的任务接回来继续看日志
+      void api.listTrainings()
+        .then((jobs) => {
+          const running = jobs.find((j) => j.status === 'running');
+          if (running) {
+            attach(running);
+            setLogs((l) => [...l, `[已重新连接训练任务 ${running.model_id}]`]);
+          }
+        })
+        .catch(() => { /* 后端不可达时忽略 */ });
     } else {
       esRef.current?.close();
       esRef.current = null;
+      streamDone.current = true;
       setJob(null);
       setLogs([]);
     }
@@ -49,38 +114,10 @@ export default function TrainModal() {
         model_id: modelId.trim() || null,
         dataset, epochs, batch_size: batchSize, lr, num_samples: numSamples,
       });
-      setJob(res.job);
-      const es = new EventSource(`/api/trainings/${res.job.job_id}/logs`);
-      esRef.current = es;
-      es.onmessage = (ev) => {
-        try {
-          const evt = JSON.parse(ev.data);
-          if (evt.type === 'metric') {
-            const acc = evt.val_acc !== undefined ? ` acc=${evt.val_acc}` : '';
-            setLogs((l) => [...l, `epoch ${evt.epoch}  train_loss=${evt.train_loss}  val_loss=${evt.val_loss}${acc}  (${evt.seconds}s)`]);
-          } else if (evt.type === 'status') {
-            setLogs((l) => [...l, `[status] ${evt.message ?? JSON.stringify(evt)}`]);
-            if (evt.status === 'done' || evt.status === 'failed' || evt.status === 'stopped') es.close();
-          } else if (evt.type === 'error') {
-            setLogs((l) => [...l, `[error] ${evt.message}`]);
-          } else if (evt.type === 'done') {
-            setLogs((l) => [...l, `[done] ${evt.message}`]);
-            es.close();
-            setJob((j) => (j ? { ...j, status: 'done' } : j));
-          }
-        } catch { /* 非 JSON 行忽略 */ }
-      };
-      es.onerror = () => {
-        setLogs((l) => [...l, '[连接断开]']);
-        es.close();
-      };
+      attach(res.job);
       message.success(`训练已启动，模型 ID：${res.model_id}`);
     } catch (e) {
-      const detail = e instanceof api.ApiError ? e.detail : null;
-      const msg = detail && typeof detail === 'object' && 'errors' in (detail as object)
-        ? (detail as { errors: { message: string }[] }).errors.map((x) => x.message).join('；')
-        : e instanceof Error ? e.message : '启动失败';
-      message.error({ content: `训练启动失败：${msg}`, duration: 6 });
+      message.error({ content: `训练启动失败：${apiErrorText(e, '启动失败')}`, duration: 6 });
     } finally {
       setStarting(false);
     }
@@ -88,8 +125,13 @@ export default function TrainModal() {
 
   const stop = async () => {
     if (!job) return;
-    await api.stopTraining(job.job_id);
-    setLogs((l) => [...l, '[已手动停止]']);
+    try {
+      await api.stopTraining(job.job_id);
+      setJob((j) => (j ? { ...j, status: 'stopped' } : j));
+      setLogs((l) => [...l, '[已手动停止]']);
+    } catch (e) {
+      message.error(`停止训练失败：${apiErrorText(e, '未知错误')}`);
+    }
   };
 
   const ds = datasets.find((d) => d.id === dataset);
@@ -135,7 +177,7 @@ export default function TrainModal() {
       {job && (
         <div className="mf-train-log">
           <Space style={{ marginBottom: 6 }}>
-            <Tag color={job.status === 'running' ? 'processing' : job.status === 'done' ? 'success' : 'error'}>
+            <Tag color={job.status === 'running' ? 'processing' : job.status === 'done' ? 'success' : job.status === 'stopped' ? 'warning' : 'error'}>
               {job.status}
             </Tag>
             <span style={{ fontSize: 12, color: '#888' }}>模型 ID: {job.model_id}</span>

@@ -5,11 +5,14 @@ import { useGraphStore } from '../stores/graphStore';
 import { useUIStore } from '../stores/uiStore';
 import type { Dtype, Port } from '../schema/graph';
 import * as api from '../api/client';
+import { apiErrorText } from './errors';
 
 const DTYPES: Dtype[] = ['float32', 'float16', 'int64', 'int32', 'bool'];
 
 export default function SaveModuleModal() {
-  const store = useGraphStore();
+  // 性能：全店订阅会让弹窗随拖拽高频重渲染——动作走 getState() 快照
+  const store = useGraphStore.getState();
+  const moduleCount = useGraphStore((s) => s.modules.length);
   const { saveModuleOpen, setSaveModuleOpen } = useUIStore();
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
@@ -17,17 +20,20 @@ export default function SaveModuleModal() {
   const [outputs, setOutputs] = useState<Port[]>([]);
   const [saving, setSaving] = useState(false);
 
+  // 打开时快照计算（打开后画布不再变化）
   const extract = useMemo(
-    () => (saveModuleOpen ? store.extractSubgraph(store.selectedNodeIds) : null),
+    () => (saveModuleOpen
+      ? useGraphStore.getState().extractSubgraph(useGraphStore.getState().selectedNodeIds)
+      : null),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [saveModuleOpen, store.selectedNodeIds, store.nodes, store.edges],
+    [saveModuleOpen],
   );
 
   useEffect(() => {
     if (!extract) return;
     setInputs(extract.inputGroups.map((g) => ({ name: g.suggestedName, dtype: g.dtype, shape: [...g.shape] })));
     setOutputs(extract.outputGroups.map((g) => ({ name: g.suggestedName, dtype: g.dtype, shape: [...g.shape] })));
-    setName(`MyModule${store.modules.length + 1}`);
+    setName(`MyModule${moduleCount + 1}`);
     setDescription('');
   }, [extract]);
 
@@ -51,12 +57,7 @@ export default function SaveModuleModal() {
       message.success(`自定义模块「${name}」已保存，可在左侧面板拖入使用`);
       setSaveModuleOpen(false);
     } catch (e) {
-      const detail = e instanceof api.ApiError ? e.detail : null;
-      const msg = detail && typeof detail === 'object' && 'report' in (detail as object)
-        ? (detail as { report: { errors: { message: string }[] } }).report.errors
-            .map((x) => x.message).join('；')
-        : e instanceof Error ? e.message : '保存失败';
-      message.error({ content: `保存失败：${msg}`, duration: 6 });
+      message.error({ content: `保存失败：${apiErrorText(e, '未知错误')}`, duration: 6 });
     } finally {
       setSaving(false);
     }
@@ -126,7 +127,7 @@ export default function SaveModuleModal() {
             <Alert type="warning" showIcon message="子图没有对外输出，至少选中一个输出被外部使用的节点" />
           )}
           <div className="mf-props-hint" style={{ marginTop: 8 }}>
-            保存后出现在左侧面板「自定义模块」组，可在任意模型中拖入复用；右键节点可回改定义。
+            保存后出现在左侧面板「自定义模块」组，可在任意模型中拖入复用；点模块卡片上的「编辑定义」可回改。
           </div>
         </>
       )}

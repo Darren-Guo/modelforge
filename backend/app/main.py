@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .api.routes import router
-from .store import init_db
+from .store import init_db, mark_stale_trainings
 
 app = FastAPI(title="ModelForge Backend", version="0.1.0")
 
@@ -23,6 +23,8 @@ app.include_router(router)
 @app.on_event("startup")
 def _startup() -> None:
     init_db()
+    # 上个进程遗留的 running 任务其子进程已不存在，落为失败（终态）
+    mark_stale_trainings()
 
 
 @app.get("/api/health")
