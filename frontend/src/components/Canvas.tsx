@@ -3,7 +3,7 @@
  * 注意：传给 React Flow 的回调必须保持稳定身份（useCallback + getState()），
  * 否则内部 store 同步 → onSelectionChange → set → 重渲染 会形成死循环。
  */
-import { useCallback, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import {
   Background, Controls, MiniMap, ReactFlow, useReactFlow,
   type Connection, type Edge, type IsValidConnection, type Node, type OnConnectEnd,
@@ -14,6 +14,7 @@ import { useGraphStore } from '../stores/graphStore';
 import { useUIStore } from '../stores/uiStore';
 import { nodeTypes } from '../nodes/ModuleNode';
 import { checkConnection, portOfGraph } from '../utils/shape';
+import { SNAP_GRID } from '../utils/autoLayout';
 import * as api from '../api/client';
 import { apiErrorText } from './errors';
 import { GRAPH_IN, GRAPH_OUT } from '../schema/graph';
@@ -37,8 +38,14 @@ function connectionIssue(conn: Connection | Edge): string | null {
 export default function Canvas() {
   const nodes = useGraphStore((s) => s.nodes);
   const edges = useGraphStore((s) => s.edges);
-  const { screenToFlowPosition } = useReactFlow();
+  const fitViewTick = useGraphStore((s) => s.fitViewTick);
+  const { screenToFlowPosition, fitView } = useReactFlow();
   const wrapper = useRef<HTMLDivElement>(null);
+
+  // 导入 / 自动布局 / 打开模块定义后把视野收敛到整图
+  useEffect(() => {
+    if (fitViewTick > 0) void fitView({ padding: 0.15, duration: 240 });
+  }, [fitViewTick, fitView]);
 
   const styledEdges = useMemo(
     () => edges.map((e) => ({
@@ -170,10 +177,12 @@ export default function Canvas() {
         onNodeDoubleClick={onNodeDoubleClick}
         fitView
         minZoom={0.2}
+        snapToGrid
+        snapGrid={[SNAP_GRID, SNAP_GRID]}
         deleteKeyCode={['Backspace', 'Delete']}
         proOptions={{ hideAttribution: true }}
       >
-        <Background gap={18} size={1} />
+        <Background gap={SNAP_GRID} size={1} />
         <Controls showInteractive={false} />
         <MiniMap
           nodeStrokeWidth={3}

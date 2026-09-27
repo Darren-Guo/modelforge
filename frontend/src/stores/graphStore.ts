@@ -12,6 +12,7 @@ import type {
 } from '../schema/graph';
 import { GRAPH_IN, GRAPH_OUT } from '../schema/graph';
 import { checkConnection, portOfGraph } from '../utils/shape';
+import { computeAutoLayout, positionsOverlap } from '../utils/autoLayout';
 
 export interface ModuleNodeData {
   op: string;
@@ -88,6 +89,9 @@ interface GraphState {
   // 自定义模块编辑模式
   editing: ModuleEditMode | null;
 
+  // 自增计数：导入/自动布局后 Canvas 据此触发一次 fitView
+  fitViewTick: number;
+
   // ---- actions ----
   init: () => Promise<void>;
   refreshModules: () => Promise<void>;
@@ -105,6 +109,8 @@ interface GraphState {
   setModelMeta: (meta: Partial<{ name: string; description: string }>) => void;
   deleteElements: (nodeIds: string[], edgeIds: string[]) => void;
   clearCanvas: () => void;
+  autoLayout: () => void;
+  requestFitView: () => void;
 
   exportGraph: () => Graph;
   importGraph: (g: Graph) => void;
@@ -209,6 +215,12 @@ function scheduleGraphFlush() {
 const defaultPorts = (defs: { name: string; dtype: string }[]): Port[] =>
   defs.map((d) => ({ name: d.name, dtype: d.dtype as Dtype, shape: [] }));
 
+/** 整体重排节点坐标（dagre 分层 + 网格对齐，见 utils/autoLayout）。 */
+function withAutoLayout(nodes: RFNode[], edges: RFEdge[]): RFNode[] {
+  const pos = computeAutoLayout(nodes, edges);
+  return nodes.map((n) => (pos.has(n.id) ? { ...n, position: pos.get(n.id)! } : n));
+}
+
 /** 画布上的「模型输入/模型输出」固定虚拟节点。 */
 function makeIONodes(inputs: Port[], outputs: Port[]): RFNode[] {
   return [
@@ -243,6 +255,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
   validation: null,
   validating: false,
   editing: null,
+  fitViewTick: 0,
 
   async init() {
     const ops = await api.fetchOps();
@@ -423,6 +436,17 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     get().scheduleValidate();
   },
 
+  autoLayout() {
+    const { nodes, edges } = get();
+    if (nodes.length === 0) return;
+    set({ nodes: withAutoLayout(nodes, edges) });
+    get().requestFitView();
+  },
+
+  requestFitView() {
+    set({ fitViewTick: get().fitViewTick + 1 });
+  },
+
   exportGraph() {
     const { nodes, edges, graphInputs, graphOutputs, modelMeta } = get();
     const gnodes: GraphNode[] = nodes
@@ -472,13 +496,16 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     advanceIdCounter([...g.nodes.map((n) => n.id), ...g.edges.map((e) => e.id)]);
     manualPorts.clear();
     set({
-      nodes, edges,
+      // 文件缺坐标或坐标互相重叠（缩成一团）→ 自动分层重排；排布合理则原样沿用
+      nodes: positionsOverlap(nodes) ? withAutoLayout(nodes, edges) : nodes,
+      edges,
       graphInputs: g.inputs.map((p) => ({ ...p })),
       graphOutputs: g.outputs.map((p) => ({ ...p })),
       modelMeta: { ...g.model },
       selectedNodeIds: [], selectedEdgeIds: [],
       validation: null,
     });
+    get().requestFitView();
     get().scheduleValidate();
   },
 
@@ -688,7 +715,8 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     // 模块内部节点沿用其 id，同样要把计数器推到已用 id 之后
     advanceIdCounter([...mod.graph.nodes.map((n) => n.id), ...mod.graph.edges.map((e) => e.id)]);
     set({
-      nodes, edges,
+      nodes: positionsOverlap(nodes) ? withAutoLayout(nodes, edges) : nodes,
+      edges,
       graphInputs: mod.inputs.map((p) => ({ ...p })),
       graphOutputs: mod.outputs.map((p) => ({ ...p })),
       selectedNodeIds: [], selectedEdgeIds: [],
@@ -699,6 +727,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         snapshot,
       },
     });
+    get().requestFitView();
     get().scheduleValidate();
   },
 

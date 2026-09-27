@@ -2,7 +2,7 @@
 import { useRef } from 'react';
 import { Badge, Button, Popconfirm, Popover, Space, Tag, Tooltip, message } from 'antd';
 import {
-  ApiOutlined, CheckCircleOutlined, CodeOutlined, CloudUploadOutlined,
+  ApiOutlined, ApartmentOutlined, CheckCircleOutlined, CodeOutlined, CloudUploadOutlined,
   DownloadOutlined, ExperimentOutlined, FolderOpenOutlined, ImportOutlined,
   PartitionOutlined, WarningOutlined,
 } from '@ant-design/icons';
@@ -103,6 +103,11 @@ export default function Toolbar() {
         <Button size="small" icon={<CheckCircleOutlined />} onClick={() => void store.validateNow()}>
           校验
         </Button>
+        <Tooltip title="自动整理布局：按数据流从左到右分层排列（netron / draw.io 风格）">
+          <Button size="small" icon={<ApartmentOutlined />} onClick={() => store.autoLayout()}>
+            自动布局
+          </Button>
+        </Tooltip>
         <Button size="small" icon={<ImportOutlined />} onClick={() => fileRef.current?.click()}>
           导入
         </Button>
